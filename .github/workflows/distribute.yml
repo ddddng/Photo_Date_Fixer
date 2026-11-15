@@ -1,0 +1,86 @@
+name: Desktop packages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows portable and setup
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build portable executable and NSIS installer
+        run: npm run tauri build -- --bundles nsis
+      - name: Build MSI installer (optional)
+        continue-on-error: true
+        run: npm run tauri build -- --bundles msi
+      - name: Assemble Windows distributions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path distribution, distribution/portable | Out-Null
+          $exe = "src-tauri/target/release/photo-date-fixer.exe"
+          if (-not (Test-Path $exe)) { throw "Portable executable is missing" }
+          Copy-Item $exe distribution/portable/Photo-Date-Fixer.exe
+          Set-Content -Path distribution/portable/README.txt -Encoding utf8 -Value "Run Photo-Date-Fixer.exe directly. No installation is required. The system WebView2 runtime is needed. App preferences and undo records are stored in the local user's application data directory, not beside the executable."
+          Compress-Archive -Path distribution/portable/* -DestinationPath distribution/Photo-Date-Fixer-Windows-portable-x64.zip -Force
+          $setup = @(Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" -File)
+          if ($setup.Count -eq 0) { throw "NSIS installer is missing" }
+          Copy-Item $setup.FullName distribution/
+          if (Test-Path "src-tauri/target/release/bundle/msi") {
+            Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File | ForEach-Object { Copy-Item $_.FullName distribution/ }
+          }
+          Remove-Item -Recurse -Force distribution/portable
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Photo-Date-Fixer-Windows-x64
+          path: distribution/*
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Linux AppImage and deb
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install WebKitGTK and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install JavaScript dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build Linux deb package
+        run: npm run tauri build -- --bundles deb
+      - name: Build Linux portable AppImage (optional)
+        continue-on-error: true
+        run: npm run tauri build -- --bundles appimage
+      - name: Assemble Linux distributions
+        run: |
+          mkdir -p distribution
+          find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f -exec cp {} distribution/ \;
+          if [ -d src-tauri/target/release/bundle/appimage ]; then
+            find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -type f -exec cp {} distribution/ \;
+          fi
+          test -n "$(find distribution -maxdepth 1 -type f -name '*.deb' -print -quit)"
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Photo-Date-Fixer-Linux-x64
+          path: distribution/*
+          if-no-files-found: error
+          retention-days: 30
