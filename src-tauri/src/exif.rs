@@ -183,6 +183,25 @@ pub fn sha256(file: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Packaging CI sets this variable to the bundled ExifTool path. This
+    // tests the actual Rust long-lived worker against two synthetic images.
+    #[test]
+    fn persistent_session_writes_and_reads_two_generated_photos() {
+        let Ok(binary) = std::env::var("PHOTO_DATE_FIXER_TEST_EXIFTOOL") else { return };
+        let png: &[u8] = &[137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,2,0,0,0,2,8,2,0,0,0,253,212,154,115,0,0,0,16,73,68,65,84,120,156,99,232,152,185,27,136,24,32,20,0,51,82,7,113,188,229,3,45,0,0,0,0,73,69,78,68,174,66,96,130];
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new(Path::new(&binary)).unwrap();
+        let original_pid = session.child.id();
+        for n in 0..2 {
+            let file = dir.path().join(format!("sample{n}.png"));
+            std::fs::write(&file, png).unwrap();
+            assert_eq!(session.read_datetime_original(&file).unwrap(), None);
+            session.write_datetime_original(&file, "2099-12-31 23:59:59", 0).unwrap();
+            assert_eq!(session.read_datetime_original(&file).unwrap().as_deref(), Some("2099:12:31 23:59:59"));
+            assert_eq!(session.child.id(), original_pid, "ExifTool must stay alive between files");
+        }
+    }
+
     #[test]
     fn only_supported_image_formats_are_eligible_for_exif_writing() {
         assert!(supports_embedded_exif(Path::new("picture.png")));
