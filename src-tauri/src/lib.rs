@@ -497,6 +497,9 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, st
     }).collect();
     drop(files);
     if items.is_empty() { return Err("没有可执行的匹配文件".into()); }
+    // Reuse one hidden, long-lived ExifTool process across this repair batch,
+    // instead of launching three console applications per photo.
+    let mut session = exif::Session::new(&executable)?;
     let id = Uuid::new_v4().to_string();
     let journal_path = journal_path(&app, &id)?;
     let backup_dir = local_dir(&app)?.join("operations").join(&id);
@@ -523,7 +526,7 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, st
             if current.unix_seconds() != item.before_seconds || current.nanoseconds() != item.before_nanos {
                 return Err("原始文件时间已在扫描后改变，请重新扫描".into());
             }
-            let existing = exif::read_datetime_original(&executable, file)?;
+            let existing = session.read_datetime_original(file)?;
             if existing.is_some() && !overwrite_existing {
                 item.error = Some("已有 EXIF 拍摄时间；默认保留现有元数据".into());
                 return Ok(false);
@@ -536,7 +539,7 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, st
                 .ok_or_else(|| "目标时间戳无效".to_owned())?
                 .with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string();
             let writing = (|| -> Result<(), String> {
-                exif::write_datetime_original(&executable, file, &target_date, item.target_nanos)?;
+                session.write_datetime_original(file, &target_date, item.target_nanos)?;
                 set_file_mtime(file, FileTime::from_unix_time(item.target_seconds, item.target_nanos))
                     .map_err(|e| format!("无法修复文件最后修改时间: {e}"))?;
                 let after_meta = fs::metadata(file).map_err(|e| e.to_string())?;

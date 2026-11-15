@@ -89,7 +89,7 @@ impl Session {
         // ExifTool's -@ protocol is newline-delimited. Reject embedded line
         // breaks rather than accidentally treating part of a filename as an
         // ExifTool command.
-        if filename.contains(['\r', '\n']) || arguments.iter().any(|arg| arg.contains(['\r', '\n'])) {
+        if filename.contains('\r') || filename.contains('\n') || arguments.iter().any(|arg| arg.contains('\r') || arg.contains('\n')) {
             return Err("文件名或 ExifTool 参数不能包含换行符".into());
         }
         self.request_id += 1;
@@ -109,7 +109,7 @@ impl Session {
             let mut line = String::new();
             let count = self.output.read_line(&mut line).map_err(|e| format!("读取 ExifTool 响应失败: {e}"))?;
             if count == 0 { return Err("ExifTool 工作进程意外退出".into()); }
-            if line.trim_end_matches(['\r', '\n']) == end { break; }
+            if line.trim_end_matches(&['\r', '\n'][..]) == end { break; }
             if result.len() + line.len() > 1024 * 1024 {
                 return Err("ExifTool 响应超过最大长度，拒绝处理".into());
             }
