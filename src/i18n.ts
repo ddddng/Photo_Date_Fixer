@@ -167,7 +167,58 @@ const backendWarnings: Record<string, string> = {
   '找不到 ExifTool：请安装 ExifTool，或使用包含 ExifTool 的发行版安装包': 'ExifTool is missing. Use a packaged release or install ExifTool.',
   '已有 EXIF 拍摄时间；默认保留现有元数据': 'Existing EXIF capture date was preserved',
 };
+const additionalErrors: Record<string, string> = {
+  '请选择文件夹': 'Choose a folder',
+  '无效操作编号': 'Invalid operation ID',
+  '不支持的日期精度': 'Unsupported date precision',
+  '规则 ID 重复': 'Duplicate rule ID',
+  '视频和当前媒体格式不支持 EXIF 拍摄时间写入': 'This media format does not support EXIF capture-date writing',
+  '拒绝操作符号链接': 'Cannot edit a symbolic link',
+  '文件大小已在扫描后改变': 'File size changed since scanning',
+  '原始文件时间已在扫描后改变，请重新扫描': 'The original file changed since scanning; scan again',
+  '目标时间戳无效': 'Invalid target timestamp',
+  '文件系统未保存目标修改时间': 'The file system did not retain the requested timestamp',
+  '原路径不再是普通文件': 'Original file path no longer points to a regular file',
+  '没有完整原文件备份，无法自动撤销': 'Cannot undo: original-file backup is missing',
+  '原始文件备份已丢失': 'Original-file backup was lost',
+  '写入过程可能被中断；备份仍然存在，需要人工核对': 'Writing was interrupted; the original backup is still available',
+  '文件已被其他程序改动，拒绝覆盖，原始备份仍保留': 'File changed externally; undo will not overwrite it. Backup retained.',
+  '原文件恢复后校验失败，原始备份仍然保留': 'Restored file failed verification. Original backup retained.',
+  '文件大小已改变': 'File size has changed',
+  '文件已在操作之后发生变化，拒绝覆盖': 'The file changed after repair; undo will not overwrite it',
+  '没有扫描结果': 'No scan results',
+  '当前筛选没有可导出的文件': 'The current filter has no files to export',
+  '无法连接 ExifTool 的输入通道': 'Cannot connect to ExifTool input',
+  '无法连接 ExifTool 的输出通道': 'Cannot connect to ExifTool output',
+  'ExifTool 不能处理当前文件路径的字符编码': 'ExifTool cannot represent this filename encoding',
+  '文件名或 ExifTool 参数不能包含换行符': 'Filename or ExifTool argument contains a line break',
+  'ExifTool 常驻模式要求绝对文件路径': 'Persistent ExifTool requires an absolute file path',
+  'ExifTool 工作进程意外退出': 'ExifTool worker exited unexpectedly',
+  'ExifTool 响应超过最大长度，拒绝处理': 'ExifTool response is unexpectedly large',
+  '无效的目标拍摄日期': 'Invalid capture date',
+  '写入后 EXIF 拍摄时间回读验证失败': 'EXIF capture date failed readback verification',
+};
+const errorPrefixes: [string, string][] = [
+  ['无法访问目录:', 'Cannot access folder:'],
+  ['无法在本地保存原文件备份:', 'Unable to save original-file backup:'],
+  ['无法更新文件修改时间:', 'Unable to update file modification time:'],
+  ['无法分发照片处理任务:', 'Unable to queue photo repair:'],
+  ['照片处理进程异常终止:', 'Photo repair worker terminated unexpectedly:'],
+  ['启动常驻 ExifTool 失败:', 'Unable to start ExifTool worker:'],
+  ['读取 ExifTool 响应失败:', 'Cannot read ExifTool response:'],
+  ['ExifTool 写入未成功:', 'ExifTool write failed:'],
+];
 export function message(locale: Locale, text: string): string {
   if (locale === 'zh') return text;
-  return backendWarnings[text] ?? text;
+  const exact = backendWarnings[text] ?? additionalErrors[text];
+  if (exact) return exact;
+  if (text.startsWith('规则 ')) {
+    const m = /^规则 (.+) 的(精度无效|来源无效)/.exec(text);
+    if (m) return 'Rule ' + m[1] + ' has invalid ' + (m[2] === '精度无效' ? 'precision' : 'source');
+    return text.replace(/^规则 /, 'Rule ');
+  }
+  for (const [source, translation] of errorPrefixes) {
+    if (text.startsWith(source)) return translation + text.slice(source.length);
+  }
+  return text;
 }
