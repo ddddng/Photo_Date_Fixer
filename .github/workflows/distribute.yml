@@ -89,6 +89,7 @@ jobs:
           python scripts/verify_exiftool.py "src-tauri/resources/exiftool/exiftool.exe"
           $env:PHOTO_DATE_FIXER_TEST_EXIFTOOL = (Resolve-Path "src-tauri/resources/exiftool/exiftool.exe").Path
           cargo test --manifest-path src-tauri/Cargo.toml persistent_session_writes_and_reads_two_generated_photos -- --nocapture
+          cargo test --manifest-path src-tauri/Cargo.toml parallel_exif_workers_write_and_restore_synthetic_photos -- --nocapture
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Build portable executable and NSIS installer
@@ -143,6 +144,7 @@ jobs:
           src-tauri/resources/exiftool/exiftool -ver
           python3 scripts/verify_exiftool.py "src-tauri/resources/exiftool/exiftool"
           PHOTO_DATE_FIXER_TEST_EXIFTOOL="$(pwd)/src-tauri/resources/exiftool/exiftool" cargo test --manifest-path src-tauri/Cargo.toml persistent_session_writes_and_reads_two_generated_photos -- --nocapture
+          PHOTO_DATE_FIXER_TEST_EXIFTOOL="$(pwd)/src-tauri/resources/exiftool/exiftool" cargo test --manifest-path src-tauri/Cargo.toml parallel_exif_workers_write_and_restore_synthetic_photos -- --nocapture
       - name: Install JavaScript dependencies
         run: npm install --no-audit --no-fund
       - name: Build Linux DEB package
