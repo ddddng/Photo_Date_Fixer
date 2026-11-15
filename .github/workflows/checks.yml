@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # Avoid non-actionable Git's "default initial branch" hints in ephemeral CI checkouts.
+  GIT_CONFIG_COUNT: '1'
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
