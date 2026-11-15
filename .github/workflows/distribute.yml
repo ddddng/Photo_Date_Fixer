@@ -11,6 +11,10 @@ on:
         type: string
         required: false
 
+concurrency:
+  group: desktop-packages-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -165,6 +169,14 @@ jobs:
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            head="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')"
+            if [[ "$head" != "$GITHUB_SHA" ]]; then
+              echo "A newer commit exists; do not publish outdated packages"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release already exists: $tag (will not silently replace published assets)"
             echo "publish=false" >> "$GITHUB_OUTPUT"
