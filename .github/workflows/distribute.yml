@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag for a new release (for example v0.1.1); leave blank for v0.1.0'
+        description: 'Tag for a new release (for example v0.1.1); leave blank for v0.2.0'
         type: string
         required: false
 
@@ -21,6 +21,21 @@ env:
   GIT_CONFIG_VALUE_0: main
 
 jobs:
+  cleanup_legacy_checksum:
+    name: Remove redundant checksum from previous release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Remove SHA256SUMS.txt from v0.1.0 if still present
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS.txt; then
+            gh release delete-asset v0.1.0 SHA256SUMS.txt --yes --repo "$GITHUB_REPOSITORY"
+          fi
+
   windows:
     name: Windows portable, NSIS and MSI
     runs-on: windows-latest
@@ -31,6 +46,24 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install and verify offline ExifTool for Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "13.63"
+          $zip = Join-Path $env:RUNNER_TEMP "exiftool.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "exiftool-expanded"
+          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-$($version)_64.zip" -OutFile $zip -MaximumRedirection 10
+          Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
+          $binary = Get-ChildItem -LiteralPath $expanded -Filter "exiftool(-k).exe" -Recurse -File | Select-Object -First 1
+          if (-not $binary) { throw "Official ExifTool executable not found in archive" }
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources/exiftool" | Out-Null
+          Copy-Item -LiteralPath $binary.FullName -Destination "src-tauri/resources/exiftool/exiftool.exe"
+          $data = Join-Path $binary.DirectoryName "exiftool_files"
+          if (-not (Test-Path -LiteralPath $data)) { throw "ExifTool runtime directory missing" }
+          Copy-Item -LiteralPath $data -Destination "src-tauri/resources/exiftool/exiftool_files" -Recurse
+          & "./src-tauri/resources/exiftool/exiftool.exe" -ver
+          if ($LASTEXITCODE -ne 0) { throw "Bundled ExifTool failed verification" }
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Build portable executable and NSIS installer
@@ -44,6 +77,7 @@ jobs:
           $exe = "src-tauri/target/release/photo-date-fixer.exe"
           if (-not (Test-Path $exe)) { throw "Portable executable is missing" }
           Copy-Item $exe distribution/portable/Photo-Date-Fixer.exe
+          Copy-Item "src-tauri/resources/exiftool" "distribution/portable/exiftool" -Recurse -Force
           Set-Content -Path distribution/portable/README.txt -Encoding utf8 -Value "Run Photo-Date-Fixer.exe directly. No installation is required. The system WebView2 runtime is needed. App preferences and undo records are stored in the local user's application data directory, not beside the executable."
           Compress-Archive -Path distribution/portable/* -DestinationPath distribution/Photo-Date-Fixer-Windows-portable-x64.zip -Force
           $setup = @(Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" -File)
@@ -74,7 +108,14 @@ jobs:
       - name: Install WebKitGTK and packaging dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libimage-exiftool-perl
+      - name: Bundle offline ExifTool for Linux
+        run: |
+          mkdir -p src-tauri/resources/exiftool/lib
+          cp /usr/bin/exiftool src-tauri/resources/exiftool/exiftool
+          cp -a /usr/share/perl5/Image src-tauri/resources/exiftool/lib/
+          chmod +x src-tauri/resources/exiftool/exiftool
+          src-tauri/resources/exiftool/exiftool -ver
       - name: Install JavaScript dependencies
         run: npm install --no-audit --no-fund
       - name: Build Linux DEB package
@@ -115,7 +156,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             tag="$GITHUB_REF_NAME"
           else
-            tag="${RELEASE_TAG_INPUT:-v0.1.0}"
+            tag="${RELEASE_TAG_INPUT:-v0.2.0}"
           fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
             echo "Invalid release tag format"
@@ -134,7 +175,7 @@ jobs:
           pattern: Photo-Date-Fixer-*
           path: release-assets
           merge-multiple: true
-      - name: Validate distribution files and calculate checksums
+      - name: Validate five distribution files
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         run: |
@@ -144,7 +185,6 @@ jobs:
           test -n "$(find release-assets -maxdepth 1 -type f -name '*portable*.zip' -print -quit)"
           test -n "$(find release-assets -maxdepth 1 -type f -name '*.deb' -print -quit)"
           test -n "$(find release-assets -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
-          (cd release-assets && sha256sum -- * > SHA256SUMS.txt)
       - name: Create prerelease and upload verified build assets
         if: steps.gate.outputs.publish == 'true'
         shell: bash
@@ -166,8 +206,8 @@ jobs:
           RELEASE_TAG: ${{ steps.gate.outputs.tag }}
         run: |
           count="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')"
-          if [[ "$count" -ne 6 ]]; then
-            echo "Expected 5 desktop packages and SHA256SUMS.txt, got $count"
+          if [[ "$count" -ne 5 ]]; then
+            echo "Expected 5 desktop packages, got $count"
             exit 1
           fi
           echo "Release assets verified: $count"
