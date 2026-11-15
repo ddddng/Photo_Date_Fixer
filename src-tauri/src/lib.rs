@@ -213,10 +213,17 @@ fn choose_candidates(candidates: &[Candidate]) -> (String, Option<Candidate>, Op
 fn refine_with_mtime(
     selection: Option<Candidate>, 
     seconds: i64,
+    nanos: u32,
     enabled: bool,
 ) -> (Option<Candidate>, bool) {
     let Some(mut selected) = selection else { return (None, false) };
-    if !enabled || selected.precision == 4 { return (Some(selected), false); }
+    if !enabled { return (Some(selected), false); }
+    if selected.precision == 4 {
+        // A file modification time may include sub-second precision even when
+        // the best filename rule is only accurate to one second.
+        let precise = selected.epoch == Some(seconds) && nanos > 0;
+        return (Some(selected), precise);
+    }
     let Some(original) = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)
         .map(|v| v.with_timezone(&Local).naive_local()) else { return (Some(selected), false); };
     let Ok(candidate) = NaiveDateTime::parse_from_str(&selected.date, "%Y-%m-%d %H:%M:%S") else {
@@ -323,7 +330,7 @@ fn scan_sync(app: AppHandle, runtime: Arc<Runtime>, root: String) -> Result<Summ
             .map(|v| v.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
         let candidates = get_candidates(entry.path(), &root, &compiled);
         let (status, selected, warning) = choose_candidates(&candidates);
-        let (selected, refined_from_mtime) = refine_with_mtime(selected, stamp.unix_seconds(), preserve_mtime);
+        let (selected, refined_from_mtime) = refine_with_mtime(selected, stamp.unix_seconds(), stamp.nanoseconds(), preserve_mtime);
         rows.push(FileRow {
             id: rows.len(), path: entry.path().to_string_lossy().into_owned(),
             name: entry.file_name().to_string_lossy().into_owned(),
@@ -452,7 +459,7 @@ fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
         let scan_root = root.as_deref().unwrap_or_else(|| path.parent().unwrap_or(path));
         row.candidates = get_candidates(path, scan_root, &compiled);
         let (status, selected, warning) = choose_candidates(&row.candidates);
-        let (selected, refined) = refine_with_mtime(selected, row.modified_seconds, preserve_mtime);
+        let (selected, refined) = refine_with_mtime(selected, row.modified_seconds, row.modified_nanos, preserve_mtime);
         row.status = status; row.selected = selected; row.warning = warning;
         row.refined_from_mtime = refined;
     }
@@ -723,18 +730,25 @@ mod tests {
             precision, priority: 1, date: date_str.into(),
             epoch: Some(Local.with_ymd_and_hms(2022, 6, 20, 12, 0, 0).single().unwrap().timestamp()),
         };
-        let (v, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-20 12:00:00")), date, true);
+        let (v, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-20 12:00:00")), date, 0, true);
         assert!(yes);
         assert_eq!(v.unwrap().date, "2022-06-20 13:42:17");
-        let (v, yes) = refine_with_mtime(Some(rule_candidate(2, "2022-06-20 13:00:00")), date, true);
+        let (v, yes) = refine_with_mtime(Some(rule_candidate(2, "2022-06-20 13:00:00")), date, 0, true);
         assert!(yes);
         assert_eq!(v.unwrap().precision, 2);
-        let (_, yes) = refine_with_mtime(Some(rule_candidate(3, "2022-06-20 13:41:00")), date, true);
+        let (_, yes) = refine_with_mtime(Some(rule_candidate(3, "2022-06-20 13:41:00")), date, 0, true);
         assert!(!yes);
-        let (_, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-21 12:00:00")), date, true);
+        let (_, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-21 12:00:00")), date, 0, true);
         assert!(!yes);
-        let (_, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-20 12:00:00")), date, false);
+        let (_, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-20 12:00:00")), date, 0, false);
         assert!(!yes);
+        let (v, yes) = refine_with_mtime(Some(Candidate {
+            rule_id: "s".into(), rule_name: "s".into(), source: "filename".into(),
+            precision: 4, priority: 1,
+            date: "2022-06-20 13:42:17".into(), epoch: Some(date),
+        }), date, 123_000_000, true);
+        assert!(yes);
+        assert_eq!(v.unwrap().epoch, Some(date));
     }
     #[test]
     fn compact_hyphenated_seconds_rule() {
