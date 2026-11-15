@@ -59,10 +59,12 @@ struct FileRow {
 #[serde(rename_all = "camelCase")]
 struct Settings {
     preserve_precise_mtime: bool,
+    #[serde(default)]
+    overwrite_existing_exif: bool,
 }
 
 impl Default for Settings {
-    fn default() -> Self { Self { preserve_precise_mtime: true } }
+    fn default() -> Self { Self { preserve_precise_mtime: true, overwrite_existing_exif: false } }
 }
 
 #[derive(Serialize)]
@@ -117,6 +119,14 @@ struct JournalItem {
     before_seconds: i64,
     before_nanos: u32,
     target_seconds: i64,
+    #[serde(default)]
+    target_nanos: u32,
+    #[serde(default)]
+    backup_file: Option<String>,
+    #[serde(default)]
+    after_sha256: Option<String>,
+    #[serde(default)]
+    after_size: Option<u64>,
     status: String,
     error: Option<String>,
 }
@@ -125,6 +135,8 @@ struct JournalItem {
 #[serde(rename_all = "camelCase")]
 struct Journal {
     id: String,
+    #[serde(default)]
+    mode: String,
     status: String,
     items: Vec<JournalItem>,
 }
@@ -453,6 +465,8 @@ fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
 }
 
 fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, status: String, precision: Option<u8>, search: String) -> Result<OperationResult, String> {
+    let executable = exif::locate(&app)?;
+    let overwrite_existing = runtime.settings.lock().map_err(|e| e.to_string())?.overwrite_existing_exif;
     let files = runtime.files.lock().map_err(|e| e.to_string())?;
     let filter: HashSet<usize> = ids.into_iter().collect();
     let needle = search.to_lowercase();
@@ -468,43 +482,89 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, st
         Some(JournalItem {
             path: row.path.clone(), size: row.size,
             before_seconds: row.modified_seconds, before_nanos: row.modified_nanos,
-            target_seconds: target, status: "pending".into(), error: None,
+            target_seconds: target,
+            target_nanos: if row.refined_from_mtime { row.modified_nanos } else { 0 },
+            backup_file: None, after_sha256: None, after_size: None,
+            status: "pending".into(), error: None,
         })
     }).collect();
     drop(files);
     if items.is_empty() { return Err("没有可执行的匹配文件".into()); }
     let id = Uuid::new_v4().to_string();
-    let path = journal_path(&app, &id)?;
-    let mut journal = Journal { id: id.clone(), status: "running".into(), items };
-    // Write-ahead journal: original timestamps are on disk before the first file changes.
-    atomic_json(&path, &journal)?;
+    let journal_path = journal_path(&app, &id)?;
+    let backup_dir = local_dir(&app)?.join("operations").join(&id);
+    fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    let mut journal = Journal { id: id.clone(), mode: "exif".into(), status: "running".into(), items };
+    // The journal and the complete original file are written before editing.
+    // All backups remain solely in the user's local application-data folder.
+    atomic_json(&journal_path, &journal)?;
     let mut succeeded = 0;
     let mut failed = 0;
-    let skipped = 0;
+    let mut skipped = 0;
     for index in 0..journal.items.len() {
         let item = &mut journal.items[index];
-        let outcome = (|| -> Result<(), String> {
-            let meta = fs::symlink_metadata(&item.path).map_err(|e| e.to_string())?;
-            if meta.file_type().is_symlink() { return Err("拒绝操作符号链接".into()); }
-            if !meta.is_file() || meta.len() != item.size { return Err("文件大小已改变".into()); }
-            let now = FileTime::from_last_modification_time(&meta);
-            if now.unix_seconds() != item.before_seconds || now.nanoseconds() != item.before_nanos {
-                return Err("文件最后修改时间已被外部更改".into());
+        let result = (|| -> Result<bool, String> {
+            let file = Path::new(&item.path);
+            if !exif::supports_embedded_exif(file) {
+                item.error = Some("该媒体格式没有受支持的可写入 EXIF 拍摄日期（视频使用 QuickTime 元数据）".into());
+                return Ok(false);
             }
-            set_file_mtime(&item.path, FileTime::from_unix_time(item.target_seconds, 0)).map_err(|e| e.to_string())?;
-            let after = FileTime::from_last_modification_time(&fs::metadata(&item.path).map_err(|e| e.to_string())?);
-            if after.unix_seconds() != item.target_seconds { return Err("文件系统未保存预期时间".into()); }
-            Ok(())
+            let meta = fs::symlink_metadata(file).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() { return Err("拒绝操作符号链接".into()); }
+            if !meta.is_file() || meta.len() != item.size { return Err("文件大小已在扫描后改变".into()); }
+            let current = FileTime::from_last_modification_time(&meta);
+            if current.unix_seconds() != item.before_seconds || current.nanoseconds() != item.before_nanos {
+                return Err("原始文件时间已在扫描后改变，请重新扫描".into());
+            }
+            let existing = exif::read_datetime_original(&executable, file)?;
+            if existing.is_some() && !overwrite_existing {
+                item.error = Some("已有 EXIF 拍摄时间；默认保留现有元数据".into());
+                return Ok(false);
+            }
+            let before = FileTime::from_unix_time(item.before_seconds, item.before_nanos);
+            let backup = backup_dir.join(format!("{index:08}.bak"));
+            fs::copy(file, &backup).map_err(|e| format!("无法在本地保存 EXIF 撤销副本: {e}"))?;
+            item.backup_file = Some(backup.to_string_lossy().into_owned());
+            let target_date = chrono::DateTime::<chrono::Utc>::from_timestamp(item.target_seconds, item.target_nanos)
+                .ok_or_else(|| "目标时间戳无效".to_owned())?
+                .with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string();
+            let writing = (|| -> Result<(), String> {
+                exif::write_datetime_original(&executable, file, &target_date, item.target_nanos)?;
+                set_file_mtime(file, FileTime::from_unix_time(item.target_seconds, item.target_nanos))
+                    .map_err(|e| format!("无法修复文件最后修改时间: {e}"))?;
+                let after_meta = fs::metadata(file).map_err(|e| e.to_string())?;
+                let after = FileTime::from_last_modification_time(&after_meta);
+                if after.unix_seconds() != item.target_seconds {
+                    return Err("文件系统未保存目标修改时间".into());
+                }
+                item.after_size = Some(after_meta.len());
+                item.after_sha256 = Some(exif::sha256(file)?);
+                Ok(())
+            })();
+            if let Err(error) = writing {
+                // Restore the complete original byte sequence if writing or
+                // verifying EXIF fails. Retain the backup even after restore.
+                let restored = fs::copy(&backup, file).and_then(|_| set_file_mtime(file, before));
+                if let Err(restore_err) = restored {
+                    return Err(format!("{error}；原文件自动恢复失败: {restore_err}；原始副本已保留在应用数据目录"));
+                }
+                item.backup_file = None;
+                item.after_size = None;
+                item.after_sha256 = None;
+                return Err(error);
+            }
+            Ok(true)
         })();
-        match outcome {
-            Ok(()) => { item.status = "applied".into(); succeeded += 1; }
-            Err(e) => { item.status = "failed".into(); item.error = Some(e); failed += 1; }
+        match result {
+            Ok(true) => { item.status = "applied".into(); succeeded += 1; }
+            Ok(false) => { item.status = "skipped".into(); skipped += 1; }
+            Err(error) => { item.status = "failed".into(); item.error = Some(error); failed += 1; }
         }
-        if (index + 1) % 500 == 0 { atomic_json(&path, &journal)?; }
+        if (index + 1) % 100 == 0 { atomic_json(&journal_path, &journal)?; }
         let _ = app.emit("operation-progress", index + 1);
     }
     journal.status = "completed".into();
-    atomic_json(&path, &journal)?;
+    atomic_json(&journal_path, &journal)?;
     Ok(OperationResult { id, succeeded, failed, skipped })
 }
 
@@ -517,38 +577,66 @@ async fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<
 }
 
 fn undo_sync(app: AppHandle, id: String) -> Result<OperationResult, String> {
-    let path = journal_path(&app, &id)?;
-    let mut journal: Journal = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+    let journal_file = journal_path(&app, &id)?;
+    let mut journal: Journal = serde_json::from_slice(&fs::read(&journal_file).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let mut succeeded = 0;
     let mut failed = 0;
     let mut skipped = 0;
     for index in 0..journal.items.len() {
         let item = &mut journal.items[index];
-        if item.status == "undone" || item.status == "failed" { skipped += 1; continue; }
-        // A pending journal may represent a crash between the filesystem write and log flush.
+        if matches!(item.status.as_str(), "undone" | "failed" | "skipped") {
+            skipped += 1;
+            continue;
+        }
         let result = (|| -> Result<bool, String> {
-            let meta = fs::symlink_metadata(&item.path).map_err(|e| e.to_string())?;
-            if meta.file_type().is_symlink() { return Err("拒绝操作符号链接".into()); }
-            if !meta.is_file() || meta.len() != item.size { return Err("文件大小已改变".into()); }
+            let file = Path::new(&item.path);
+            let meta = fs::symlink_metadata(file).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() || !meta.is_file() { return Err("原路径不再是普通文件".into()); }
+            if journal.mode == "exif" {
+                let backup_str = item.backup_file.as_ref()
+                    .ok_or_else(|| "没有完整原文件备份，无法自动撤销".to_owned())?;
+                let backup = Path::new(backup_str);
+                if !backup.is_file() { return Err("原始文件备份已丢失".into()); }
+                let expected_hash = item.after_sha256.as_ref()
+                    .ok_or_else(|| "写入过程可能被中断；备份仍然存在，需要人工核对".to_owned())?;
+                let current_hash = exif::sha256(file)?;
+                if current_hash != *expected_hash {
+                    return Err("文件已被其他程序改动，拒绝覆盖，原始备份仍保留".into());
+                }
+                // Restore original bytes, metadata and original mtime.
+                fs::copy(backup, file).map_err(|e| e.to_string())?;
+                set_file_mtime(file, FileTime::from_unix_time(item.before_seconds, item.before_nanos))
+                    .map_err(|e| e.to_string())?;
+                let restored_hash = exif::sha256(file)?;
+                let original_hash = exif::sha256(backup)?;
+                if restored_hash != original_hash {
+                    return Err("原文件恢复后校验失败，原始备份仍然保留".into());
+                }
+                return Ok(true);
+            }
+            // v0.1 journal compatibility: filesystem timestamp-only undo.
+            if meta.len() != item.size { return Err("文件大小已改变".into()); }
             let current = FileTime::from_last_modification_time(&meta);
             if current.unix_seconds() == item.before_seconds && current.nanoseconds() == item.before_nanos {
                 return Ok(false);
             }
-            if current.unix_seconds() != item.target_seconds { return Err("文件已在操作之后发生变化，拒绝覆盖".into()); }
-            set_file_mtime(&item.path, FileTime::from_unix_time(item.before_seconds, item.before_nanos))
+            if current.unix_seconds() != item.target_seconds {
+                return Err("文件已在操作之后发生变化，拒绝覆盖".into());
+            }
+            set_file_mtime(file, FileTime::from_unix_time(item.before_seconds, item.before_nanos))
                 .map_err(|e| e.to_string())?;
             Ok(true)
         })();
         match result {
             Ok(true) => { item.status = "undone".into(); item.error = None; succeeded += 1; }
             Ok(false) => { item.status = "undone".into(); skipped += 1; }
-            Err(e) => { item.error = Some(e); failed += 1; }
+            Err(error) => { item.error = Some(error); failed += 1; }
         }
-        if (index + 1) % 500 == 0 { atomic_json(&path, &journal)?; }
+        if (index + 1) % 100 == 0 { atomic_json(&journal_file, &journal)?; }
     }
     if failed == 0 { journal.status = "undone".into(); }
-    atomic_json(&path, &journal)?;
+    atomic_json(&journal_file, &journal)?;
     Ok(OperationResult { id, succeeded, failed, skipped })
 }
 
