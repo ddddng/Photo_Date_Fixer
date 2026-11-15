@@ -3,27 +3,33 @@ name: Desktop packages
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag for a new release (for example v0.1.1); leave blank for v0.1.0'
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 jobs:
   windows:
-    name: Windows portable and setup
+    name: Windows portable, NSIS and MSI
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
+          package-manager-cache: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Build portable executable and NSIS installer
         run: npm run tauri build -- --bundles nsis
-      - name: Build MSI installer (optional)
-        continue-on-error: true
+      - name: Build MSI installer
         run: npm run tauri build -- --bundles msi
       - name: Assemble Windows distributions
         shell: pwsh
@@ -37,12 +43,12 @@ jobs:
           $setup = @(Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" -File)
           if ($setup.Count -eq 0) { throw "NSIS installer is missing" }
           Copy-Item $setup.FullName distribution/
-          if (Test-Path "src-tauri/target/release/bundle/msi") {
-            Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File | ForEach-Object { Copy-Item $_.FullName distribution/ }
-          }
+          $msi = @(Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File)
+          if ($msi.Count -eq 0) { throw "MSI installer is missing" }
+          Copy-Item $msi.FullName distribution/
           Remove-Item -Recurse -Force distribution/portable
       - name: Upload Windows packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Photo-Date-Fixer-Windows-x64
           path: distribution/*
@@ -50,37 +56,114 @@ jobs:
           retention-days: 30
 
   linux:
-    name: Linux AppImage and deb
+    name: Linux AppImage and DEB
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
+          package-manager-cache: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Configure ephemeral Git defaults for packaging tools
+        run: git config --global init.defaultBranch main
       - name: Install WebKitGTK and packaging dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - name: Install JavaScript dependencies
         run: npm install --no-audit --no-fund
-      - name: Build Linux deb package
+      - name: Build Linux DEB package
         run: npm run tauri build -- --bundles deb
-      - name: Build Linux portable AppImage (optional)
-        continue-on-error: true
+      - name: Build Linux portable AppImage
         run: npm run tauri build -- --bundles appimage
       - name: Assemble Linux distributions
         run: |
           mkdir -p distribution
           find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f -exec cp {} distribution/ \;
-          if [ -d src-tauri/target/release/bundle/appimage ]; then
-            find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -type f -exec cp {} distribution/ \;
-          fi
+          find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -type f -exec cp {} distribution/ \;
           test -n "$(find distribution -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$(find distribution -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
       - name: Upload Linux packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Photo-Date-Fixer-Linux-x64
           path: distribution/*
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: [windows, linux]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve version and check existing release
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="${RELEASE_TAG_INPUT:-v0.1.0}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+            echo "Invalid release tag format"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release already exists: $tag (will not silently replace published assets)"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v7
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          pattern: Photo-Date-Fixer-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate distribution files and calculate checksums
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find release-assets -maxdepth 1 -type f -name '*-setup.exe' -print -quit)"
+          test -n "$(find release-assets -maxdepth 1 -type f -name '*.msi' -print -quit)"
+          test -n "$(find release-assets -maxdepth 1 -type f -name '*portable*.zip' -print -quit)"
+          test -n "$(find release-assets -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$(find release-assets -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          (cd release-assets && sha256sum -- * > SHA256SUMS.txt)
+      - name: Create prerelease and upload verified build assets
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.gate.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --target "$GITHUB_SHA" \
+            --title "Photo Date Fixer $RELEASE_TAG (Preview)" \
+            --notes-file .github/RELEASE_NOTES.md \
+            --prerelease \
+            --latest=false
+      - name: Verify release assets
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.gate.outputs.tag }}
+        run: |
+          count="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')"
+          if [[ "$count" -ne 6 ]]; then
+            echo "Expected 5 desktop packages and SHA256SUMS.txt, got $count"
+            exit 1
+          fi
+          echo "Release assets verified: $count"
