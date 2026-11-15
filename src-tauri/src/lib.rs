@@ -71,6 +71,32 @@ struct Page {
     total: usize,
 }
 
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ResultCounts {
+    all: usize,
+    second: usize,
+    minute: usize,
+    hour: usize,
+    day: usize,
+    unmatched: usize,
+    conflict: usize,
+    invalid: usize,
+}
+
+// Matched files use their winning precision. Conflicts and invalid timestamps
+// remain visible within their highest-precision candidate group.
+fn result_precision(row: &FileRow) -> Option<u8> {
+    row.selected.as_ref().map(|c| c.precision)
+        .or_else(|| row.candidates.iter().map(|c| c.precision).max())
+}
+
+fn row_matches(row: &FileRow, status: &str, precision: Option<u8>, needle: &str) -> bool {
+    (status == "all" || row.status == status)
+        && precision.is_none_or(|p| result_precision(row) == Some(p))
+        && (needle.is_empty() || row.path.to_lowercase().contains(needle))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JournalItem {
@@ -295,16 +321,36 @@ fn cancel_scan(state: State<'_, Arc<Runtime>>) {
 }
 
 #[tauri::command]
-fn get_files(state: State<'_, Arc<Runtime>>, offset: usize, limit: usize, status: String, search: String) -> Result<Page, String> {
+fn get_files(state: State<'_, Arc<Runtime>>, offset: usize, limit: usize, status: String, precision: Option<u8>, search: String) -> Result<Page, String> {
+    if precision.is_some_and(|p| !(1..=4).contains(&p)) { return Err("不支持的日期精度".into()); }
     let files = state.files.lock().map_err(|e| e.to_string())?;
     let needle = search.to_lowercase();
-    let matching: Vec<&FileRow> = files.iter().filter(|row| {
-        (status == "all" || row.status == status)
-            && (needle.is_empty() || row.path.to_lowercase().contains(&needle))
-    }).collect();
-    let total = matching.len();
-    let rows = matching.into_iter().skip(offset).take(limit.min(500)).cloned().collect();
+    let filtered = files.iter().filter(|row| row_matches(row, &status, precision, &needle));
+    let total = filtered.clone().count();
+    let rows = filtered.skip(offset).take(limit.min(500)).cloned().collect();
     Ok(Page { rows, total })
+}
+
+#[tauri::command]
+fn get_result_counts(state: State<'_, Arc<Runtime>>) -> Result<ResultCounts, String> {
+    let files = state.files.lock().map_err(|e| e.to_string())?;
+    let mut counts = ResultCounts { all: files.len(), ..ResultCounts::default() };
+    for row in files.iter() {
+        match result_precision(row) {
+            Some(4) => counts.second += 1,
+            Some(3) => counts.minute += 1,
+            Some(2) => counts.hour += 1,
+            Some(1) => counts.day += 1,
+            _ => {},
+        }
+        match row.status.as_str() {
+            "unmatched" => counts.unmatched += 1,
+            "conflict" => counts.conflict += 1,
+            "invalid" => counts.invalid += 1,
+            _ => {},
+        }
+    }
+    Ok(counts)
 }
 
 #[tauri::command]
@@ -489,6 +535,28 @@ fn export_report(app: AppHandle, state: State<'_, Arc<Runtime>>, output: String)
 mod tests {
     use super::*;
     #[test]
+    fn precision_filter_keeps_conflicts_and_excludes_unmatched() {
+        let winning = Candidate { rule_id: "seconds".into(), rule_name: "seconds".into(),
+            source: "filename".into(), precision: 4, priority: 10,
+            date: "2020-01-11 14:30:25".into(), epoch: Some(1578753025) };
+        let mut alternate = winning.clone();
+        alternate.date = "2020-01-11 14:30:26".into();
+        let mut row = FileRow {
+            id: 0, path: "photos/example.jpg".into(), name: "example.jpg".into(), size: 10,
+            original: "".into(), modified_seconds: 0, modified_nanos: 0,
+            status: "conflict".into(), selected: None, candidates: vec![winning, alternate],
+            warning: None,
+        };
+        assert!(row_matches(&row, "all", Some(4), ""));
+        assert!(row_matches(&row, "conflict", Some(4), "example"));
+        assert!(!row_matches(&row, "matched", Some(4), ""));
+        assert!(!row_matches(&row, "all", Some(1), ""));
+        row.status = "unmatched".into();
+        row.candidates.clear();
+        assert!(row_matches(&row, "unmatched", None, ""));
+        assert!(!row_matches(&row, "all", Some(4), ""));
+    }
+    #[test]
     fn highest_precision_wins() {
         let rules = default_rules();
         let compiled = compile_rules(&rules).unwrap();
@@ -528,7 +596,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            start_scan, cancel_scan, get_files, get_rules, save_rules, rematch,
+            start_scan, cancel_scan, get_files, get_result_counts, get_rules, save_rules, rematch,
             apply_changes, undo_operation, get_operations, export_report,
         ])
         .run(tauri::generate_context!())
