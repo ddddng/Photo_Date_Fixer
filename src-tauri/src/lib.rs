@@ -391,11 +391,17 @@ fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
     })
 }
 
-fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>) -> Result<OperationResult, String> {
+fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, status: String, precision: Option<u8>, search: String) -> Result<OperationResult, String> {
     let files = runtime.files.lock().map_err(|e| e.to_string())?;
     let filter: HashSet<usize> = ids.into_iter().collect();
+    let needle = search.to_lowercase();
     let items: Vec<JournalItem> = files.iter().filter(|row| {
-        row.status == "matched" && (filter.is_empty() || filter.contains(&row.id))
+        row.status == "matched" &&
+            (if filter.is_empty() {
+                row_matches(row, &status, precision, &needle)
+            } else {
+                filter.contains(&row.id)
+            })
     }).filter_map(|row| {
         let target = row.selected.as_ref()?.epoch?;
         Some(JournalItem {
@@ -443,9 +449,9 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>) ->
 
 
 #[tauri::command]
-async fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<usize>) -> Result<OperationResult, String> {
+async fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<usize>, status: String, precision: Option<u8>, search: String) -> Result<OperationResult, String> {
     let runtime = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || apply_changes_sync(app, runtime, ids))
+    tauri::async_runtime::spawn_blocking(move || apply_changes_sync(app, runtime, ids, status, precision, search))
         .await.map_err(|e| e.to_string())?
 }
 
@@ -509,12 +515,15 @@ fn get_operations(app: AppHandle) -> Result<Vec<Journal>, String> {
 }
 
 #[tauri::command]
-fn export_report(app: AppHandle, state: State<'_, Arc<Runtime>>, output: String) -> Result<usize, String> {
+fn export_report(app: AppHandle, state: State<'_, Arc<Runtime>>, output: String, status: String, precision: Option<u8>, search: String) -> Result<usize, String> {
     let rows = state.files.lock().map_err(|e| e.to_string())?;
     if rows.is_empty() { return Err("没有扫描结果".into()); }
     let mut content = String::from("path,status,original,target,precision,rule\n");
     fn esc(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }
-    for row in rows.iter() {
+    let needle = search.to_lowercase();
+    let filtered: Vec<&FileRow> = rows.iter().filter(|r| row_matches(r, &status, precision, &needle)).collect();
+    if filtered.is_empty() { return Err("当前筛选没有可导出的文件".into()); }
+    for row in filtered.iter() {
         let selected = row.selected.as_ref();
         let parts = [
             esc(&row.path), esc(&row.status), esc(&row.original),
@@ -528,7 +537,7 @@ fn export_report(app: AppHandle, state: State<'_, Arc<Runtime>>, output: String)
     // Explicit user-selected destination only; reports may contain private absolute paths.
     let _ = app; // reserved for a future explicit path permission layer
     fs::write(output, content).map_err(|e| e.to_string())?;
-    Ok(rows.len())
+    Ok(filtered.len())
 }
 
 #[cfg(test)]
