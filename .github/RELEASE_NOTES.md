@@ -1,4 +1,4 @@
-# Photo Date Fixer v0.2.0 — EXIF 写入预览版
+# Photo Date Fixer v0.2.1 — EXIF 写入预览版
 
 ## 改动
 - 新增 `20991231-235959.png` 内置秒级规则。
