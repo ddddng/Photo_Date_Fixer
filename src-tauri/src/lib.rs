@@ -774,6 +774,77 @@ fn export_report(app: AppHandle, state: State<'_, Arc<Runtime>>, output: String,
 mod tests {
     use super::*;
     #[test]
+    fn legacy_settings_receive_four_parallel_workers() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"preservePreciseMtime":true,"overwriteExistingExif":false}"#
+        ).unwrap();
+        assert_eq!(settings.parallel_workers, 4);
+    }
+
+    // A real ExifTool integration test with generated, non-personal PNG files.
+    // It tests distinct sessions editing different files concurrently and
+    // confirms every original-file backup is usable.
+    #[test]
+    fn parallel_exif_workers_write_and_restore_synthetic_photos() {
+        let Ok(binary) = std::env::var("PHOTO_DATE_FIXER_TEST_EXIFTOOL") else { return };
+        let png: &[u8] = &[137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,2,0,0,0,2,8,2,0,0,0,253,212,154,115,0,0,0,16,73,68,65,84,120,156,99,232,152,185,27,136,24,32,20,0,51,82,7,113,188,229,3,45,0,0,0,0,73,69,78,68,174,66,96,130];
+        let root = tempfile::tempdir().unwrap();
+        let backup_dir = root.path().join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+        let target = Local.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).single().unwrap().timestamp();
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let path = root.path().join(format!("synthetic-{index}.png"));
+            fs::write(&path, png).unwrap();
+            let meta = fs::metadata(&path).unwrap();
+            let original = FileTime::from_last_modification_time(&meta);
+            tasks.push((index, JournalItem {
+                path: path.to_string_lossy().into_owned(),
+                size: meta.len(),
+                before_seconds: original.unix_seconds(),
+                before_nanos: original.nanoseconds(),
+                target_seconds: target,
+                target_nanos: 0,
+                backup_file: None,
+                after_sha256: None,
+                after_size: None,
+                status: "pending".into(),
+                error: None,
+            }));
+        }
+        let mut finished = Vec::new();
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for slice in tasks.chunks(2) {
+                let group = slice.to_vec();
+                let binary = binary.clone();
+                let backup_dir = backup_dir.clone();
+                handles.push(scope.spawn(move || {
+                    let mut worker = exif::Session::new(Path::new(&binary)).unwrap();
+                    group.into_iter().map(|(index, mut item)| {
+                        assert!(process_exif_item(&mut item, index, &backup_dir, false, &mut worker).unwrap());
+                        assert!(item.after_sha256.is_some());
+                        (index, item)
+                    }).collect::<Vec<_>>()
+                }));
+            }
+            for handle in handles {
+                finished.extend(handle.join().unwrap());
+            }
+        });
+        assert_eq!(finished.len(), tasks.len());
+        for (_, item) in finished {
+            let photo = Path::new(&item.path);
+            let backup = Path::new(item.backup_file.as_deref().unwrap());
+            assert_eq!(fs::read(backup).unwrap(), png);
+            assert_eq!(exif::sha256(photo).unwrap(), item.after_sha256.unwrap());
+            fs::copy(backup, photo).unwrap();
+            set_file_mtime(photo, FileTime::from_unix_time(item.before_seconds, item.before_nanos)).unwrap();
+            assert_eq!(fs::read(photo).unwrap(), png);
+        }
+    }
+
+    #[test]
     fn precision_filter_keeps_conflicts_and_excludes_unmatched() {
         let winning = Candidate { rule_id: "seconds".into(), rule_name: "seconds".into(),
             source: "filename".into(), precision: 4, priority: 10,
