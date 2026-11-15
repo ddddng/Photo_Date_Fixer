@@ -3,10 +3,33 @@
   "productName": "Photo Date Fixer",
   "version": "0.1.0",
   "identifier": "app.photodatefixer.desktop",
-  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
-  "app": {
-    "windows": [{ "title": "Photo Date Fixer", "width": 1350, "height": 850, "minWidth": 1000, "minHeight": 650, "backgroundColor": "#0b1020" }],
-    "security": { "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'" }
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
   },
-  "bundle": { "active": true, "targets": "all" }
+  "app": {
+    "windows": [
+      {
+        "title": "Photo Date Fixer",
+        "width": 1350,
+        "height": 850,
+        "minWidth": 1000,
+        "minHeight": 650,
+        "backgroundColor": "#0b1020"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
 }
