@@ -103,6 +103,7 @@ struct OperationResult {
 #[derive(Default)]
 struct Runtime {
     files: Mutex<Vec<FileRow>>,
+    root: Mutex<Option<PathBuf>>,
     rules: Mutex<Vec<Rule>>,
     cancel: AtomicBool,
 }
@@ -226,6 +227,7 @@ fn scan_sync(app: AppHandle, runtime: Arc<Runtime>, root: String) -> Result<Summ
     runtime.cancel.store(false, Ordering::Relaxed);
     // Store results only in memory. No scanned path is ever sent to a remote service.
     runtime.files.lock().map_err(|e| e.to_string())?.clear();
+    *runtime.root.lock().map_err(|e| e.to_string())? = Some(root.clone());
     let mut rows = Vec::new();
     let mut errors = 0;
     let mut cancelled = false;
@@ -327,13 +329,11 @@ fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
     let rules = state.rules.lock().map_err(|e| e.to_string())?.clone();
     let compiled = compile_rules(&rules)?;
     let mut rows = state.files.lock().map_err(|e| e.to_string())?;
-    // Directory rules can use the file's own ancestor, but never beyond its scan root:
-    // root is saved on each scan and provided by frontend in future releases.
-    // Restricting to the file parent here avoids losing matches after rule edits.
+    let root = state.root.lock().map_err(|e| e.to_string())?.clone();
     for row in rows.iter_mut() {
         let path = Path::new(&row.path);
-        let root = path.parent().unwrap_or(path);
-        row.candidates = get_candidates(path, root, &compiled);
+        let scan_root = root.as_deref().unwrap_or_else(|| path.parent().unwrap_or(path));
+        row.candidates = get_candidates(path, scan_root, &compiled);
         let (status, selected, warning) = choose_candidates(&row.candidates);
         row.status = status; row.selected = selected; row.warning = warning;
     }
@@ -369,7 +369,8 @@ fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<usize>
     let mut succeeded = 0;
     let mut failed = 0;
     let mut skipped = 0;
-    for (index, item) in journal.items.iter_mut().enumerate() {
+    for index in 0..journal.items.len() {
+        let item = &mut journal.items[index];
         let outcome = (|| -> Result<(), String> {
             let meta = fs::metadata(&item.path).map_err(|e| e.to_string())?;
             if !meta.is_file() || meta.len() != item.size { return Err("文件大小已改变".into()); }
@@ -506,9 +507,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let rules_path = local_dir(&app.handle())?.join("rules.json");
+            let rules_path = local_dir(app.handle()).map_err(std::io::Error::other)?.join("rules.json");
             let rules = fs::read(&rules_path).ok().and_then(|data| serde_json::from_slice::<Vec<Rule>>(&data).ok()).unwrap_or_else(default_rules);
-            app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), rules: Mutex::new(rules), cancel: AtomicBool::new(false) }));
+            app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), root: Mutex::new(None), rules: Mutex::new(rules), cancel: AtomicBool::new(false) }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
