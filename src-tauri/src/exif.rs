@@ -34,7 +34,22 @@ pub fn locate(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn output(executable: &Path, args: &[&str], file: &Path) -> Result<String, String> {
-    let result = Command::new(executable)
+    let mut command = Command::new(executable);
+    // The packaged Linux Perl script must resolve bundled modules even on
+    // systems that do not have libimage-exiftool-perl installed.
+    if cfg!(unix) {
+        if let Some(parent) = executable.parent() {
+            let bundled_lib = parent.join("lib");
+            if bundled_lib.is_dir() {
+                let inherited = std::env::var_os("PERL5LIB").unwrap_or_default();
+                let mut paths = vec![bundled_lib];
+                paths.extend(std::env::split_paths(&inherited));
+                let value = std::env::join_paths(paths).map_err(|e| e.to_string())?;
+                command.env("PERL5LIB", value);
+            }
+        }
+    }
+    let result = command
         .args(["-charset", "filename=UTF8"])
         .args(args)
         .arg("--")
