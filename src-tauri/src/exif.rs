@@ -52,7 +52,7 @@ pub fn read_datetime_original(executable: &Path, file: &Path) -> Result<Option<S
 }
 
 pub fn write_datetime_original(
-    executable: &Path, file: &Path, datetime: &str,
+    executable: &Path, file: &Path, datetime: &str, subsecond_nanos: u32,
 ) -> Result<(), String> {
     // A complete original-file backup is saved by the caller BEFORE this command.
     // The -P option preserves filesystem modified time until the caller chooses
@@ -65,12 +65,18 @@ pub fn write_datetime_original(
         format!("-EXIF:CreateDate={date}"),
         format!("-EXIF:ModifyDate={date}"),
     ];
-    let args = [
-        "-overwrite_original_in_place", "-P",
-        "-api", "LargeFileSupport=1",
-        tags[0].as_str(), tags[1].as_str(), tags[2].as_str(),
+    let mut args = vec![
+        "-overwrite_original_in_place".to_owned(), "-P".to_owned(),
+        "-api".to_owned(), "LargeFileSupport=1".to_owned(),
+        tags[0].clone(), tags[1].clone(), tags[2].clone(),
     ];
-    output(executable, &args, file)?;
+    if subsecond_nanos > 0 {
+        let fractional = format!("{subsecond_nanos:09}").trim_end_matches('0').to_owned();
+        args.push(format!("-EXIF:SubSecTimeOriginal={fractional}"));
+        args.push(format!("-EXIF:SubSecTimeDigitized={fractional}"));
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    output(executable, &refs, file)?;
     let reported = read_datetime_original(executable, file)?;
     if reported.as_deref() != Some(date.as_str()) {
         return Err("写入后读取验证失败：文件内 EXIF 拍摄时间与预期不符".into());
