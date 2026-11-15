@@ -419,7 +419,7 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>, st
     atomic_json(&path, &journal)?;
     let mut succeeded = 0;
     let mut failed = 0;
-    let mut skipped = 0;
+    let skipped = 0;
     for index in 0..journal.items.len() {
         let item = &mut journal.items[index];
         let outcome = (|| -> Result<(), String> {
