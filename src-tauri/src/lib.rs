@@ -161,6 +161,7 @@ struct Runtime {
     rules: Mutex<Vec<Rule>>,
     settings: Mutex<Settings>,
     cancel: AtomicBool,
+    operation_active: AtomicBool,
 }
 
 fn default_rules() -> Vec<Rule> {
@@ -377,6 +378,41 @@ fn journal_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{id}.json")))
 }
 
+struct OperationGuard<'a>(&'a AtomicBool);
+impl Drop for OperationGuard<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+}
+fn begin_operation(runtime: &Runtime) -> Result<OperationGuard<'_>, String> {
+    runtime.operation_active.compare_exchange(
+        false, true, Ordering::AcqRel, Ordering::Acquire,
+    ).map_err(|_| "Another repair or undo operation is still running".to_owned())?;
+    Ok(OperationGuard(&runtime.operation_active))
+}
+
+fn events_path(journal_file: &Path) -> PathBuf {
+    journal_file.with_extension("events")
+}
+
+/// Replay compact per-file checkpoints if a batch was interrupted. Writing a
+/// full journal JSON after every few files would cause quadratic disk I/O.
+fn load_journal(journal_file: &Path) -> Result<Journal, String> {
+    use std::io::{BufRead, BufReader};
+    let mut journal: Journal = serde_json::from_slice(
+        &fs::read(journal_file).map_err(|e| e.to_string())?
+    ).map_err(|e| e.to_string())?;
+    let path = events_path(journal_file);
+    if !path.is_file() { return Ok(journal); }
+    let reader = BufReader::new(fs::File::open(path).map_err(|e| e.to_string())?);
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if let Ok((index, item)) = serde_json::from_str::<(usize, JournalItem)>(&line) {
+            if index < journal.items.len() { journal.items[index] = item; }
+        }
+    }
+    Ok(journal)
+}
+
+
 #[tauri::command]
 async fn start_scan(app: AppHandle, state: State<'_, Arc<Runtime>>, root: String) -> Result<Summary, String> {
     let runtime = Arc::clone(state.inner());
@@ -548,6 +584,7 @@ fn apply_changes_sync(
     app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>,
     status: String, precision: Option<u8>, search: String,
 ) -> Result<OperationResult, String> {
+    let _guard = begin_operation(&runtime)?;
     let executable = exif::locate(&app)?;
     let settings = runtime.settings.lock().map_err(|e| e.to_string())?.clone();
     let files = runtime.files.lock().map_err(|e| e.to_string())?;
@@ -584,6 +621,10 @@ fn apply_changes_sync(
         item.backup_file = Some(backup_dir.join(format!("{index:08}.bak")).to_string_lossy().into_owned());
     }
     atomic_json(&journal_file, &journal)?;
+    let events_file = events_path(&journal_file);
+    let mut events = std::io::BufWriter::new(
+        fs::File::create(&events_file).map_err(|e| e.to_string())?
+    );
 
     let total = journal.items.len();
     let workers = settings.parallel_workers.clamp(1, 8).min(total);
@@ -637,15 +678,23 @@ fn apply_changes_sync(
                 _ => failed += 1,
             }
             journal.items[index] = item;
+            // Append only the completed item; never rewrite the whole batch
+            // on each checkpoint. This keeps persistence near-linear in N.
+            serde_json::to_writer(&mut events, &(index, &journal.items[index]))
+                .map_err(|e| e.to_string())?;
+            std::io::Write::write_all(&mut events, b"\n").map_err(|e| e.to_string())?;
             if (completed + 1) % 16 == 0 {
-                atomic_json(&journal_file, &journal)?;
+                std::io::Write::flush(&mut events).map_err(|e| e.to_string())?;
             }
             let _ = app.emit("operation-progress", completed + 1);
         }
         Ok(())
     })?;
+    std::io::Write::flush(&mut events).map_err(|e| e.to_string())?;
+    drop(events);
     journal.status = "completed".into();
     atomic_json(&journal_file, &journal)?;
+    let _ = fs::remove_file(events_file);
     Ok(OperationResult { id, succeeded, failed, skipped })
 }
 
@@ -657,16 +706,16 @@ async fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<
         .await.map_err(|e| e.to_string())?
 }
 
-fn undo_sync(app: AppHandle, id: String) -> Result<OperationResult, String> {
+fn undo_sync(app: AppHandle, runtime: Arc<Runtime>, id: String) -> Result<OperationResult, String> {
+    let _guard = begin_operation(&runtime)?;
     let journal_file = journal_path(&app, &id)?;
-    let mut journal: Journal = serde_json::from_slice(&fs::read(&journal_file).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let mut journal = load_journal(&journal_file)?;
     let mut succeeded = 0;
     let mut failed = 0;
     let mut skipped = 0;
     for index in 0..journal.items.len() {
         let item = &mut journal.items[index];
-        if matches!(item.status.as_str(), "undone" | "failed" | "skipped") {
+        if matches!(item.status.as_str(), "undone" | "failed" | "skipped" | "pending") {
             skipped += 1;
             continue;
         }
@@ -718,13 +767,15 @@ fn undo_sync(app: AppHandle, id: String) -> Result<OperationResult, String> {
     }
     if failed == 0 { journal.status = "undone".into(); }
     atomic_json(&journal_file, &journal)?;
+    let _ = fs::remove_file(events_path(&journal_file));
     Ok(OperationResult { id, succeeded, failed, skipped })
 }
 
 
 #[tauri::command]
-async fn undo_operation(app: AppHandle, id: String) -> Result<OperationResult, String> {
-    tauri::async_runtime::spawn_blocking(move || undo_sync(app, id))
+async fn undo_operation(app: AppHandle, state: State<'_, Arc<Runtime>>, id: String) -> Result<OperationResult, String> {
+    let runtime = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || undo_sync(app, runtime, id))
         .await.map_err(|e| e.to_string())?
 }
 
@@ -736,9 +787,7 @@ fn get_operations(app: AppHandle) -> Result<Vec<Journal>, String> {
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if path.extension().and_then(|x| x.to_str()) != Some("json") { continue; }
-        if let Ok(content) = fs::read(&path) {
-            if let Ok(journal) = serde_json::from_slice::<Journal>(&content) { out.push(journal); }
-        }
+        if let Ok(journal) = load_journal(&path) { out.push(journal); }
     }
     out.sort_by(|a,b| b.id.cmp(&a.id));
     Ok(out)
@@ -952,7 +1001,7 @@ pub fn run() {
             }
             let settings = fs::read(local_dir(app.handle()).map_err(std::io::Error::other)?.join("settings.json"))
                 .ok().and_then(|data| serde_json::from_slice::<Settings>(&data).ok()).unwrap_or_default();
-            app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), root: Mutex::new(None), rules: Mutex::new(rules), settings: Mutex::new(settings), cancel: AtomicBool::new(false) }));
+            app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), root: Mutex::new(None), rules: Mutex::new(rules), settings: Mutex::new(settings), cancel: AtomicBool::new(false), operation_active: AtomicBool::new(false) }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
