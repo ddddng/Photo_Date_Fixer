@@ -371,7 +371,8 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>) ->
     for index in 0..journal.items.len() {
         let item = &mut journal.items[index];
         let outcome = (|| -> Result<(), String> {
-            let meta = fs::metadata(&item.path).map_err(|e| e.to_string())?;
+            let meta = fs::symlink_metadata(&item.path).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() { return Err("拒绝操作符号链接".into()); }
             if !meta.is_file() || meta.len() != item.size { return Err("文件大小已改变".into()); }
             let now = FileTime::from_last_modification_time(&meta);
             if now.unix_seconds() != item.before_seconds || now.nanoseconds() != item.before_nanos {
@@ -386,7 +387,7 @@ fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>) ->
             Ok(()) => { item.status = "applied".into(); succeeded += 1; }
             Err(e) => { item.status = "failed".into(); item.error = Some(e); failed += 1; }
         }
-        if index % 25 == 0 { atomic_json(&path, &journal)?; }
+        if (index + 1) % 500 == 0 { atomic_json(&path, &journal)?; }
         let _ = app.emit("operation-progress", index + 1);
     }
     journal.status = "completed".into();
@@ -414,7 +415,8 @@ fn undo_sync(app: AppHandle, id: String) -> Result<OperationResult, String> {
         if item.status == "undone" || item.status == "failed" { skipped += 1; continue; }
         // A pending journal may represent a crash between the filesystem write and log flush.
         let result = (|| -> Result<bool, String> {
-            let meta = fs::metadata(&item.path).map_err(|e| e.to_string())?;
+            let meta = fs::symlink_metadata(&item.path).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() { return Err("拒绝操作符号链接".into()); }
             if !meta.is_file() || meta.len() != item.size { return Err("文件大小已改变".into()); }
             let current = FileTime::from_last_modification_time(&meta);
             if current.unix_seconds() == item.before_seconds && current.nanoseconds() == item.before_nanos {
@@ -430,7 +432,7 @@ fn undo_sync(app: AppHandle, id: String) -> Result<OperationResult, String> {
             Ok(false) => { item.status = "undone".into(); skipped += 1; }
             Err(e) => { item.error = Some(e); failed += 1; }
         }
-        if index % 25 == 0 { atomic_json(&path, &journal)?; }
+        if (index + 1) % 500 == 0 { atomic_json(&path, &journal)?; }
     }
     if failed == 0 { journal.status = "undone".into(); }
     atomic_json(&path, &journal)?;
