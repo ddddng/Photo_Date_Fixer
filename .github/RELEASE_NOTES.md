@@ -1,17 +1,23 @@
-# Photo Date Fixer v0.2.1 — EXIF 写入预览版
+# Photo Date Fixer 1.0.0
 
-## 改动
-- 新增 `20991231-235959.png` 内置秒级规则。
-- 新增默认开启的精度补全：原修改时间与文件名/目录日期在已有精度内一致时，保留更精确的时间。
-- 将修复目标从“仅修改 LastWriteTime”升级为“写入 EXIF 拍摄日期，同时设置文件修改时间”。
-- 写入前备份完整原件，写入后回读 EXIF 验证，撤销时恢复备份文件内容。
-- 默认保留已有 EXIF 拍摄时间；可在规则页主动开启覆盖。
-- 安装包包含离线 ExifTool（Linux 运行需 Perl）。
+First stable version of the local photo EXIF date recovery application.
 
-## 下载
-Windows x64：Portable ZIP、NSIS EXE、MSI。
-Linux x86-64：AppImage、DEB。
-GitHub 本身为 Release 附件显示 SHA-256，不另附校验清单。
+## Highlights
+- Persistent ExifTool worker: much faster repeated EXIF operations.
+- No Windows command prompt windows flashing for each photo.
+- Embedded EXIF DateTimeOriginal and related date tags; optional protection for
+  images that already have EXIF.
+- Date extraction, second/minute/hour/day precision priority, precision
+  refinement when the existing modification time agrees, interactive filtering.
+- Complete original-file backups and verified undo.
+- GPL-3.0-or-later open-source licensing, with dependency notices and
+  contribution/privacy guidelines.
+- Windows portable ZIP / EXE / MSI; Linux AppImage / DEB.
 
-## 已知限制
-首版 EXIF 写入只针对支持的照片格式；MP4/MOV 视频需另行处理 QuickTime 日期元数据。尚未完成真实照片库批量测试，建议先用少量复制出的照片验证。
+## Important notes
+- ExifTool uses the Artistic or GPL licenses of Perl. License notices are in
+  the repository.
+- MP4 and MOV video metadata is distinct from photo EXIF and not written in
+  this version.
+- Backups are stored locally and may use as much disk space as the edited
+  photos. They support complete rollback.

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag for a new release (for example v0.1.1); leave blank for v0.2.1'
+        description: 'Tag for a new release (for example v0.1.1); leave blank for v1.0.0'
         type: string
         required: false
 
@@ -102,6 +102,8 @@ jobs:
           & "./src-tauri/resources/exiftool/exiftool.exe" -ver
           if ($LASTEXITCODE -ne 0) { throw "Bundled ExifTool failed verification" }
           python scripts/verify_exiftool.py "src-tauri/resources/exiftool/exiftool.exe"
+          $env:PHOTO_DATE_FIXER_TEST_EXIFTOOL = (Resolve-Path "src-tauri/resources/exiftool/exiftool.exe").Path
+          cargo test --manifest-path src-tauri/Cargo.toml persistent_session_writes_and_reads_two_generated_photos -- --nocapture
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Build portable executable and NSIS installer
@@ -155,6 +157,7 @@ jobs:
           chmod +x src-tauri/resources/exiftool/exiftool
           src-tauri/resources/exiftool/exiftool -ver
           python3 scripts/verify_exiftool.py "src-tauri/resources/exiftool/exiftool"
+          PHOTO_DATE_FIXER_TEST_EXIFTOOL="$(pwd)/src-tauri/resources/exiftool/exiftool" cargo test --manifest-path src-tauri/Cargo.toml persistent_session_writes_and_reads_two_generated_photos -- --nocapture
       - name: Install JavaScript dependencies
         run: npm install --no-audit --no-fund
       - name: Build Linux DEB package
@@ -195,7 +198,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             tag="$GITHUB_REF_NAME"
           else
-            tag="${RELEASE_TAG_INPUT:-v0.2.1}"
+            tag="${RELEASE_TAG_INPUT:-v1.0.0}"
           fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
             echo "Invalid release tag format"
@@ -241,10 +244,8 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" release-assets/* \
             --target "$GITHUB_SHA" \
-            --title "Photo Date Fixer $RELEASE_TAG (Preview)" \
-            --notes-file .github/RELEASE_NOTES.md \
-            --prerelease \
-            --latest=false
+            --title "Photo Date Fixer $RELEASE_TAG" \
+            --notes-file .github/RELEASE_NOTES.md
       - name: Verify release assets
         if: steps.gate.outputs.publish == 'true'
         shell: bash

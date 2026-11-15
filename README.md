@@ -1,60 +1,79 @@
 # Photo Date Fixer
 
-完全本地运行的照片日期恢复工具。Tauri 2 + React + TypeScript + Rust。
+An offline GUI tool for reconstructing photo capture dates from filenames and
+folder names, then writing the resulting dates into **EXIF metadata**.
+Built with Tauri 2, React, TypeScript and Rust.
 
-**当前版本：v0.2.1 开发预览版。**
+**Stable release: v1.0.0 — GNU GPL v3 or later.**
 
-## 核心功能
+## Features
 
-- 递归扫描照片与视频文件；扫描本身只读，不上传用户文件。
-- 日期候选来源为文件名、父目录；**秒 > 分钟 > 小时 > 天**，同精度按规则优先级匹配。
-- 内置 `20991231-235959.png`、`IMG_20200111_143025.jpg` 等秒级文件名规则。
-- **默认开启**「原修改时间与规则日期一致时，借用更精确的时分秒」；设置可关闭，且仅在日期/小时/分钟真实一致时采用。
-- **执行修复会写入照片内部 EXIF 拍摄日期**（DateTimeOriginal / CreateDate / ModifyDate）；文件系统的最后修改时间也会更新。
-- 通过 ExifTool 写入并重新读取验证。已有 EXIF 拍摄日期默认不覆盖，用户可在规则设置中开启覆盖。
-- 修改前备份**完整原件**到用户的本地应用数据目录，撤销会恢复原始文件内容和原修改时间，并验证校验值。
-- 结果工作台支持精度、状态、文件名筛选；可查看多个日期候选，修复仅作用于当前筛选或选中项。
-- JPEG/JPG、PNG、HEIC/HEIF、DNG、TIFF、WebP 可尝试写入 EXIF；视频使用 QuickTime 元数据，不在当前 EXIF 写入范围内，执行时跳过。
+- Recursive read-only scanning of image and video collections.
+- Filename and directory parsing rules, with
+  **second > minute > hour > day** precision priority.
+- Built-in patterns including `20991231-235959.png` and
+  `IMG_20200111_143025.jpg`.
+- Optional precision refinement from the original modification timestamp
+  **only when it agrees with the rule's date/time prefix**, enabled by default.
+- Review matched, unmatched and conflicting files with precision filters.
+- Write embedded EXIF `DateTimeOriginal`, `CreateDate`, and `ModifyDate`
+  to supported images using ExifTool. Existing EXIF dates remain unchanged
+  unless the user enables overwriting them.
+- **Fast, invisible ExifTool worker**: one persistent process per repair batch
+  instead of repeated command launches per photo.
+- Preserve the original photo bytes in a private on-device backup before
+  writing; restore the original bytes and modification time from the operation
+  history.
+- Windows portable ZIP, EXE installer and MSI; Linux AppImage and DEB.
+- No accounts, photo uploads, telemetry or machine fingerprinting.
 
-## 本地开发
+## Download
 
-安装 Node.js、Rust、Windows C++ Build Tools / WebView2。开发运行需要本地 ExifTool：
-- Windows: 从 [ExifTool](https://exiftool.org/) 下载，放到 PATH，或把 `exiftool.exe` 和 `exiftool_files` 整个目录放进 `src-tauri/resources/exiftool/`。
-- Linux: 可以安装 `libimage-exiftool-perl`，提供 `exiftool` 命令。
+Download the latest stable version from
+[GitHub Releases](https://github.com/ddddng/Photo_Date_Fixer/releases).
+
+## Development
+
+Install Node.js, Rust, and your platform's Tauri 2 development dependencies.
+ExifTool is required when writing EXIF data. Packaging CI retrieves and
+verifies ExifTool before embedding it into installers.
 
 ```sh
 npm install
-npm run tauri dev
 npm run build
-cd src-tauri && cargo test && cargo check
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml
+npm run tauri dev
 ```
 
-CI 构建在安装包中自动包含 ExifTool 运行所需文件。Windows portable ZIP 也包含 ExifTool。
+To exercise the persistent Rust ExifTool test with a local installed binary:
 
-## 使用流程
+```sh
+PHOTO_DATE_FIXER_TEST_EXIFTOOL=/usr/bin/exiftool cargo test --manifest-path src-tauri/Cargo.toml persistent_session_writes_and_reads_two_generated_photos
+```
 
-1. 扫描媒体文件夹。
-2. 在「匹配规则」确认是否开启原修改时间精度细化、是否覆盖现有 EXIF。
-3. 在「结果工作台」按秒/分钟/小时/天和状态筛选，预览预计写入时间。
-4. 选择文件后执行。应用将照片的原件完整备份到当前用户的本地应用数据目录，避免向照片文件夹添加 `_original` 文件。
-5. 在「操作记录」可撤销：将被修改照片的文件字节与修改时间恢复为原值。
+The test creates synthetic PNG images rather than using personal photographs.
 
-**原件备份可能占用较多本地磁盘空间。** 备份会保留供撤销使用，不会提交到 GitHub 或上传到互联网。
+## Notes
 
-## 目前限制
+- EXIF writing is supported for common photo formats (JPG/JPEG, PNG, HEIC/HEIF,
+  DNG, TIFF and WebP). ExifTool may not be able to modify every image variant.
+- MP4/MOV video files use QuickTime metadata instead of EXIF, and are currently
+  skipped during writing.
+- Undo backs up the **entire original image**, so it needs available disk space.
+  Backups and journal files stay on the user's machine.
+- For large libraries, use the GUI's preview and try a few synthetic or copied
+  files before applying a batch.
 
-- 时间匹配仍使用文件名/目录。已有 EXIF 拍摄时间的文件在执行时检查，默认跳过；更全面的扫描时读取与比较未来实现。
-- MOV/MP4 等视频没有相同的 EXIF DateTimeOriginal 写入机制，需要独立的 QuickTime 元数据实现。
-- ExifTool 逐个读取、写入和验收，处理大量媒体文件的效率有进一步优化空间。
-- 尚未完成真实 NAS 大规模文件与全部图片格式实机回归测试。
-- 跨平台便携包依赖相应系统运行环境；Linux 需要 Perl 才能运行捆绑的 ExifTool 脚本。
+## Privacy, contributions and licensing
 
-## 隐私与开源
+Do not submit personal photos, local paths, IP addresses, hardware/software
+profiles, log files or any information identifying a user into source control.
 
-应用不采集硬件、系统、网络/IP 等诊断资料。扫描路径、照片与 EXIF 写入撤销副本只保存在本机；导出 CSV 由用户明确选择目标路径。
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) and
+[SECURITY.md](.github/SECURITY.md) for the contribution and disclosure process.
 
-**禁止把真实照片、用户路径、EXIF 内容、备份、日志、硬件信息和身份相关数据提交到本仓库。**
-
-MIT 许可证见 [LICENSE](LICENSE)。内嵌 ExifTool 由其作者发布，附带原许可文件。
-
-发布包的 SHA-256 校验值由 GitHub Releases 原生展示，不额外附带 `SHA256SUMS.txt`。
+Photo Date Fixer is distributed under **GPL-3.0-or-later**.
+Third-party components retain their licenses: see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+ExifTool is available under the same terms as Perl itself (Artistic or GPL).
