@@ -64,6 +64,7 @@ jobs:
           Copy-Item -LiteralPath $data -Destination "src-tauri/resources/exiftool/exiftool_files" -Recurse
           & "./src-tauri/resources/exiftool/exiftool.exe" -ver
           if ($LASTEXITCODE -ne 0) { throw "Bundled ExifTool failed verification" }
+          python scripts/verify_exiftool.py "src-tauri/resources/exiftool/exiftool.exe"
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Build portable executable and NSIS installer
@@ -116,6 +117,7 @@ jobs:
           cp -a /usr/share/perl5/Image src-tauri/resources/exiftool/lib/
           chmod +x src-tauri/resources/exiftool/exiftool
           src-tauri/resources/exiftool/exiftool -ver
+          python3 scripts/verify_exiftool.py "src-tauri/resources/exiftool/exiftool"
       - name: Install JavaScript dependencies
         run: npm install --no-audit --no-fund
       - name: Build Linux DEB package
