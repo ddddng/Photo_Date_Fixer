@@ -100,7 +100,11 @@ impl Session {
         for argument in arguments {
             writeln!(self.input, "{argument}").map_err(|e| e.to_string())?;
         }
-        writeln!(self.input, "--").map_err(|e| e.to_string())?;
+        // Do NOT add "--" here. In ExifTool's persistent -@ protocol it
+        // disables the "-executeN" delimiter, leaving the worker blocked.
+        // Files are always scanned as canonical absolute paths, so their
+        // arguments cannot be mistaken for command switches.
+        if !file.is_absolute() { return Err("ExifTool 常驻模式要求绝对文件路径".into()); }
         writeln!(self.input, "{filename}").map_err(|e| e.to_string())?;
         writeln!(self.input, "-execute{}", self.request_id).map_err(|e| e.to_string())?;
         self.input.flush().map_err(|e| e.to_string())?;
