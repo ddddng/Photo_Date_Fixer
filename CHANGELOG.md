@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 — Parallel EXIF repairs and bilingual desktop UI
+
+- Configurable parallel pool of 1–8 persistent ExifTool workers (default 4).
+- Per-file backups, EXIF writes, readback verification and integrity checks
+  run independently, with a single coordinator writing undo journal updates.
+- English-first user interface with a persistent Simplified Chinese switch.
+- Full English README, Chinese README and bilingual release notes.
+- Preserved existing Git commits; no history rewrite.
+
 ## 1.0.0 — Stable release
 
 - Replaced repeated ExifTool process launches with a persistent, hidden worker

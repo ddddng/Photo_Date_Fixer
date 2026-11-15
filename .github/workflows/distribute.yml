@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Tag for a new release (for example v0.1.1); leave blank for v1.0.0'
+        description: 'Tag for a new release (for example v0.1.1); leave blank for v1.1.0'
         type: string
         required: false
 
@@ -183,7 +183,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             tag="$GITHUB_REF_NAME"
           else
-            tag="${RELEASE_TAG_INPUT:-v1.0.0}"
+            tag="${RELEASE_TAG_INPUT:-v1.1.0}"
           fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
             echo "Invalid release tag format"
