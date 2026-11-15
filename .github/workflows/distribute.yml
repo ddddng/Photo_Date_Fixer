@@ -25,21 +25,6 @@ env:
   GIT_CONFIG_VALUE_0: main
 
 jobs:
-  cleanup_legacy_checksum:
-    name: Remove redundant checksum from previous release
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Remove SHA256SUMS.txt from v0.1.0 if still present
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS.txt; then
-            gh release delete-asset v0.1.0 SHA256SUMS.txt --yes --repo "$GITHUB_REPOSITORY"
-          fi
-
   windows:
     name: Windows portable, NSIS and MSI
     runs-on: windows-latest
