@@ -138,6 +138,7 @@ fn default_rules() -> Vec<Rule> {
     let data = [
         ("name-seconds-compact", "文件名：年月日_时分秒", 4, "filename", r"(?P<date>\d{8}_\d{6})", "%Y%m%d_%H%M%S", 10),
         ("name-seconds-dashed", "文件名：连字符日期时间", 4, "filename", r"(?P<date>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})", "%Y-%m-%d_%H-%M-%S", 20),
+        ("name-seconds-compact-hyphen", "文件名：年月日-时分秒（20991231-235959）", 4, "filename", r"(?P<date>\d{8}-\d{6})(?:[^\d]|$)", "%Y%m%d-%H%M%S", 15),
         ("name-minutes", "文件名：精确到分钟", 3, "filename", r"(?P<date>\d{8}_\d{4})(?:[^\d]|$)", "%Y%m%d_%H%M", 10),
         ("name-hours", "文件名：精确到小时", 2, "filename", r"(?P<date>\d{8}_\d{2})(?:[^\d]|$)", "%Y%m%d_%H", 10),
         ("name-days-dashed", "文件名：年月日", 1, "filename", r"(?P<date>\d{4}-\d{2}-\d{2})", "%Y-%m-%d", 10),
@@ -565,6 +566,18 @@ mod tests {
         assert!(row_matches(&row, "unmatched", None, ""));
         assert!(!row_matches(&row, "all", Some(4), ""));
     }
+    #[test]
+    fn compact_hyphenated_seconds_rule() {
+        let compiled = compile_rules(&default_rules()).unwrap();
+        let path = Path::new("Web/2099-12-31/20991231-235959.png");
+        let values = get_candidates(path, Path::new("Web"), &compiled);
+        let (status, chosen, _) = choose_candidates(&values);
+        assert_eq!(status, "matched");
+        let selected = chosen.expect("seconds match");
+        assert_eq!(selected.date, "2099-12-31 23:59:59");
+        assert_eq!(selected.precision, 4);
+    }
+
     #[test]
     fn highest_precision_wins() {
         let rules = default_rules();
