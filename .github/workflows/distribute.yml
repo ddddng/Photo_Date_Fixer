@@ -76,6 +76,20 @@ jobs:
             }
             Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue
           }
+          if (-not $verified) {
+            # Chocolatey publishes the unmodified upstream x64 zip inside its
+            # NuGet package; verify the embedded zip against ExifTool's hash.
+            $nupkg = Join-Path $env:RUNNER_TEMP "exiftool.13.63.0.nupkg"
+            $unpack = Join-Path $env:RUNNER_TEMP "exiftool-nupkg"
+            Invoke-WebRequest -Uri "https://community.chocolatey.org/api/v2/package/exiftool/13.63.0" -OutFile $nupkg -MaximumRedirection 10
+            Copy-Item -LiteralPath $nupkg -Destination "$nupkg.zip"
+            Expand-Archive -LiteralPath "$nupkg.zip" -DestinationPath $unpack -Force
+            $embedded = Get-ChildItem -LiteralPath $unpack -Filter "exiftool-$($version)_64.zip" -Recurse -File | Select-Object -First 1
+            if ($embedded -and (Get-FileHash -LiteralPath $embedded.FullName -Algorithm SHA256).Hash -ieq $expectedHash) {
+              Copy-Item -LiteralPath $embedded.FullName -Destination $zip
+              $verified = $true
+            }
+          }
           if (-not $verified) { throw "Unable to download ExifTool with the expected upstream checksum" }
           Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
           $binary = Get-ChildItem -LiteralPath $expanded -Filter "exiftool(-k).exe" -Recurse -File | Select-Object -First 1
