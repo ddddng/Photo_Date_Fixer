@@ -1,4 +1,5 @@
-use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+mod exif;
 use filetime::{set_file_mtime, FileTime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,17 @@ struct FileRow {
     selected: Option<Candidate>,
     candidates: Vec<Candidate>,
     warning: Option<String>,
+    refined_from_mtime: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    preserve_precise_mtime: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self { Self { preserve_precise_mtime: true } }
 }
 
 #[derive(Serialize)]
@@ -131,6 +143,7 @@ struct Runtime {
     files: Mutex<Vec<FileRow>>,
     root: Mutex<Option<PathBuf>>,
     rules: Mutex<Vec<Rule>>,
+    settings: Mutex<Settings>,
     cancel: AtomicBool,
 }
 
@@ -180,6 +193,35 @@ fn choose_candidates(candidates: &[Candidate]) -> (String, Option<Candidate>, Op
         return ("invalid".into(), None, Some("日期在当前时区无唯一有效时间点".into()));
     }
     ("matched".into(), Some(chosen), None)
+}
+
+// The original modification timestamp may be more precise than the winning
+// rule. Only borrow its finer fields if the timestamp agrees at the rule's
+// real precision. The winning rule/precision are kept for auditing.
+fn refine_with_mtime(
+    selection: Option<Candidate>, 
+    seconds: i64,
+    enabled: bool,
+) -> (Option<Candidate>, bool) {
+    let Some(mut selected) = selection else { return (None, false) };
+    if !enabled || selected.precision == 4 { return (Some(selected), false); }
+    let Some(original) = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)
+        .map(|v| v.with_timezone(&Local).naive_local()) else { return (Some(selected), false); };
+    let Ok(candidate) = NaiveDateTime::parse_from_str(&selected.date, "%Y-%m-%d %H:%M:%S") else {
+        return (Some(selected), false);
+    };
+    let same = match selected.precision {
+        1 => candidate.date() == original.date(),
+        2 => candidate.date() == original.date() && candidate.hour() == original.hour(),
+        3 => candidate.date() == original.date() && candidate.hour() == original.hour() && candidate.minute() == original.minute(),
+        _ => false,
+    };
+    if same && Some(seconds) != selected.epoch {
+        selected.epoch = Some(seconds);
+        selected.date = original.format("%Y-%m-%d %H:%M:%S").to_string();
+        return (Some(selected), true);
+    }
+    (Some(selected), false)
 }
 
 fn get_candidates(path: &Path, root: &Path, compiled: &[(Rule, Regex)]) -> Vec<Candidate> {
@@ -251,6 +293,7 @@ fn scan_sync(app: AppHandle, runtime: Arc<Runtime>, root: String) -> Result<Summ
     if !root.is_dir() { return Err("请选择文件夹".into()); }
     let rules = runtime.rules.lock().map_err(|e| e.to_string())?.clone();
     let compiled = compile_rules(&rules)?;
+    let preserve_mtime = runtime.settings.lock().map_err(|e| e.to_string())?.preserve_precise_mtime;
     runtime.cancel.store(false, Ordering::Relaxed);
     // Store results only in memory. No scanned path is ever sent to a remote service.
     runtime.files.lock().map_err(|e| e.to_string())?.clear();
@@ -268,11 +311,13 @@ fn scan_sync(app: AppHandle, runtime: Arc<Runtime>, root: String) -> Result<Summ
             .map(|v| v.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
         let candidates = get_candidates(entry.path(), &root, &compiled);
         let (status, selected, warning) = choose_candidates(&candidates);
+        let (selected, refined_from_mtime) = refine_with_mtime(selected, stamp.unix_seconds(), preserve_mtime);
         rows.push(FileRow {
             id: rows.len(), path: entry.path().to_string_lossy().into_owned(),
             name: entry.file_name().to_string_lossy().into_owned(),
             size: metadata.len(), original, modified_seconds: stamp.unix_seconds(),
             modified_nanos: stamp.nanoseconds(), status, selected, candidates, warning,
+            refined_from_mtime,
         });
         if rows.len() % 100 == 0 {
             let _ = app.emit("scan-progress", rows.len());
@@ -355,6 +400,18 @@ fn get_result_counts(state: State<'_, Arc<Runtime>>) -> Result<ResultCounts, Str
 }
 
 #[tauri::command]
+fn get_settings(state: State<'_, Arc<Runtime>>) -> Result<Settings, String> {
+    Ok(state.settings.lock().map_err(|e| e.to_string())?.clone())
+}
+
+#[tauri::command]
+fn save_settings(app: AppHandle, state: State<'_, Arc<Runtime>>, settings: Settings) -> Result<(), String> {
+    atomic_json(&local_dir(&app)?.join("settings.json"), &settings)?;
+    *state.settings.lock().map_err(|e| e.to_string())? = settings;
+    Ok(())
+}
+
+#[tauri::command]
 fn get_rules(state: State<'_, Arc<Runtime>>) -> Result<Vec<Rule>, String> {
     Ok(state.rules.lock().map_err(|e| e.to_string())?.clone())
 }
@@ -375,6 +432,7 @@ fn save_rules(app: AppHandle, state: State<'_, Arc<Runtime>>, rules: Vec<Rule>) 
 fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
     let rules = state.rules.lock().map_err(|e| e.to_string())?.clone();
     let compiled = compile_rules(&rules)?;
+    let preserve_mtime = state.settings.lock().map_err(|e| e.to_string())?.preserve_precise_mtime;
     let mut rows = state.files.lock().map_err(|e| e.to_string())?;
     let root = state.root.lock().map_err(|e| e.to_string())?.clone();
     for row in rows.iter_mut() {
@@ -382,7 +440,9 @@ fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
         let scan_root = root.as_deref().unwrap_or_else(|| path.parent().unwrap_or(path));
         row.candidates = get_candidates(path, scan_root, &compiled);
         let (status, selected, warning) = choose_candidates(&row.candidates);
+        let (selected, refined) = refine_with_mtime(selected, row.modified_seconds, preserve_mtime);
         row.status = status; row.selected = selected; row.warning = warning;
+        row.refined_from_mtime = refined;
     }
     Ok(Summary {
         total: rows.len(), matched: rows.iter().filter(|r| r.status == "matched").count(),
@@ -556,6 +616,7 @@ mod tests {
             original: "".into(), modified_seconds: 0, modified_nanos: 0,
             status: "conflict".into(), selected: None, candidates: vec![winning, alternate],
             warning: None,
+            refined_from_mtime: false,
         };
         assert!(row_matches(&row, "all", Some(4), ""));
         assert!(row_matches(&row, "conflict", Some(4), "example"));
@@ -565,6 +626,27 @@ mod tests {
         row.candidates.clear();
         assert!(row_matches(&row, "unmatched", None, ""));
         assert!(!row_matches(&row, "all", Some(4), ""));
+    }
+    #[test]
+    fn mtime_refines_day_hour_and_minute_only_on_exact_prefix() {
+        let date = Local.with_ymd_and_hms(2022, 6, 20, 13, 42, 17).single().unwrap().timestamp();
+        let rule_candidate = |precision, date_str: &str| Candidate {
+            rule_id: "x".into(), rule_name: "x".into(), source: "directory".into(),
+            precision, priority: 1, date: date_str.into(),
+            epoch: Some(Local.with_ymd_and_hms(2022, 6, 20, 12, 0, 0).single().unwrap().timestamp()),
+        };
+        let (v, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-20 12:00:00")), date, true);
+        assert!(yes);
+        assert_eq!(v.unwrap().date, "2022-06-20 13:42:17");
+        let (v, yes) = refine_with_mtime(Some(rule_candidate(2, "2022-06-20 13:00:00")), date, true);
+        assert!(yes);
+        assert_eq!(v.unwrap().precision, 2);
+        let (_, yes) = refine_with_mtime(Some(rule_candidate(3, "2022-06-20 13:41:00")), date, true);
+        assert!(!yes);
+        let (_, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-21 12:00:00")), date, true);
+        assert!(!yes);
+        let (_, yes) = refine_with_mtime(Some(rule_candidate(1, "2022-06-20 12:00:00")), date, false);
+        assert!(!yes);
     }
     #[test]
     fn compact_hyphenated_seconds_rule() {
@@ -614,11 +696,13 @@ pub fn run() {
         .setup(|app| {
             let rules_path = local_dir(app.handle()).map_err(std::io::Error::other)?.join("rules.json");
             let rules = fs::read(&rules_path).ok().and_then(|data| serde_json::from_slice::<Vec<Rule>>(&data).ok()).unwrap_or_else(default_rules);
-            app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), root: Mutex::new(None), rules: Mutex::new(rules), cancel: AtomicBool::new(false) }));
+            let settings = fs::read(local_dir(app.handle()).map_err(std::io::Error::other)?.join("settings.json"))
+                .ok().and_then(|data| serde_json::from_slice::<Settings>(&data).ok()).unwrap_or_default();
+            app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), root: Mutex::new(None), rules: Mutex::new(rules), settings: Mutex::new(settings), cancel: AtomicBool::new(false) }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            start_scan, cancel_scan, get_files, get_result_counts, get_rules, save_rules, rematch,
+            start_scan, cancel_scan, get_files, get_result_counts, get_rules, save_rules, get_settings, save_settings, rematch,
             apply_changes, undo_operation, get_operations, export_report,
         ])
         .run(tauri::generate_context!())
