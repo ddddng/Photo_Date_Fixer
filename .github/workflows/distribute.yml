@@ -57,7 +57,26 @@ jobs:
           $version = "13.63"
           $zip = Join-Path $env:RUNNER_TEMP "exiftool.zip"
           $expanded = Join-Path $env:RUNNER_TEMP "exiftool-expanded"
-          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-$($version)_64.zip" -OutFile $zip -MaximumRedirection 10
+          $expectedHash = "7a4bff4b1d6ee15adef882837847f76c0ed23228d294feed285939b6c9b293bd"
+          $sources = @(
+            "https://downloads.sourceforge.net/project/exiftool/exiftool-$($version)_64.zip",
+            "https://sourceforge.net/projects/exiftool/files/exiftool-$($version)_64.zip/download",
+            "https://fossies.org/windows/misc/exiftool-$($version)_64.zip"
+          )
+          $verified = $false
+          foreach ($source in $sources) {
+            try {
+              Invoke-WebRequest -Uri $source -OutFile $zip -MaximumRedirection 10
+              if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ieq $expectedHash) {
+                $verified = $true
+                break
+              }
+            } catch {
+              Write-Host "Trying next verified ExifTool mirror"
+            }
+            Remove-Item -LiteralPath $zip -ErrorAction SilentlyContinue
+          }
+          if (-not $verified) { throw "Unable to download ExifTool with the expected upstream checksum" }
           Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
           $binary = Get-ChildItem -LiteralPath $expanded -Filter "exiftool(-k).exe" -Recurse -File | Select-Object -First 1
           if (-not $binary) { throw "Official ExifTool executable not found in archive" }
