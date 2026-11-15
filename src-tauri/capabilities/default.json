@@ -1,0 +1,1 @@
+{ "$schema": "../gen/schemas/desktop-schema.json", "identifier": "default", "description": "Only dialog and core window APIs", "windows": ["main"], "permissions": ["core:default", "dialog:allow-open"] }
