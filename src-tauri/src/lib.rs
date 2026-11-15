@@ -345,9 +345,8 @@ fn rematch(state: State<'_, Arc<Runtime>>) -> Result<Summary, String> {
     })
 }
 
-#[tauri::command]
-fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<usize>) -> Result<OperationResult, String> {
-    let files = state.files.lock().map_err(|e| e.to_string())?;
+fn apply_changes_sync(app: AppHandle, runtime: Arc<Runtime>, ids: Vec<usize>) -> Result<OperationResult, String> {
+    let files = runtime.files.lock().map_err(|e| e.to_string())?;
     let filter: HashSet<usize> = ids.into_iter().collect();
     let items: Vec<JournalItem> = files.iter().filter(|row| {
         row.status == "matched" && (filter.is_empty() || filter.contains(&row.id))
@@ -395,8 +394,15 @@ fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<usize>
     Ok(OperationResult { id, succeeded, failed, skipped })
 }
 
+
 #[tauri::command]
-fn undo_operation(app: AppHandle, id: String) -> Result<OperationResult, String> {
+async fn apply_changes(app: AppHandle, state: State<'_, Arc<Runtime>>, ids: Vec<usize>) -> Result<OperationResult, String> {
+    let runtime = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || apply_changes_sync(app, runtime, ids))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn undo_sync(app: AppHandle, id: String) -> Result<OperationResult, String> {
     let path = journal_path(&app, &id)?;
     let mut journal: Journal = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -429,6 +435,13 @@ fn undo_operation(app: AppHandle, id: String) -> Result<OperationResult, String>
     if failed == 0 { journal.status = "undone".into(); }
     atomic_json(&path, &journal)?;
     Ok(OperationResult { id, succeeded, failed, skipped })
+}
+
+
+#[tauri::command]
+async fn undo_operation(app: AppHandle, id: String) -> Result<OperationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || undo_sync(app, id))
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
