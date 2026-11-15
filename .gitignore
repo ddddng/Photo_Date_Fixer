@@ -22,3 +22,7 @@ coverage/
 screenshots/
 samples/private/
 test-output/
+
+# Bundled third-party ExifTool binaries are fetched in CI, never committed.
+src-tauri/resources/exiftool/*
+!src-tauri/resources/exiftool/.gitkeep

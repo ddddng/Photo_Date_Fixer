@@ -16,6 +16,7 @@ pub fn locate(app: &AppHandle) -> Result<PathBuf, String> {
     let mut paths = Vec::new();
     if let Ok(resource) = app.path().resource_dir() {
         paths.push(resource.join("exiftool").join(executable));
+        paths.push(resource.join("resources").join("exiftool").join(executable));
     }
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(parent) = current_exe.parent() {

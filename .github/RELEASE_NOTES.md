@@ -1,25 +1,17 @@
-# Photo Date Fixer — Preview
+# Photo Date Fixer v0.2.0 — EXIF 写入预览版
 
-This is an early preview of the offline media timestamp recovery application.
+## 改动
+- 新增 `20991231-235959.png` 内置秒级规则。
+- 新增默认开启的精度补全：原修改时间与文件名/目录日期在已有精度内一致时，保留更精确的时间。
+- 将修复目标从“仅修改 LastWriteTime”升级为“写入 EXIF 拍摄日期，同时设置文件修改时间”。
+- 写入前备份完整原件，写入后回读 EXIF 验证，撤销时恢复备份文件内容。
+- 默认保留已有 EXIF 拍摄时间；可在规则页主动开启覆盖。
+- 安装包包含离线 ExifTool（Linux 运行需 Perl）。
 
-## Included packages
+## 下载
+Windows x64：Portable ZIP、NSIS EXE、MSI。
+Linux x86-64：AppImage、DEB。
+GitHub 本身为 Release 附件显示 SHA-256，不另附校验清单。
 
-- Windows x64: portable ZIP, NSIS EXE installer, and MSI installer.
-- Linux x86-64: AppImage and Debian/Ubuntu DEB package.
-- SHA256SUMS.txt: checksums for verifying the downloaded packages.
-
-## Available functionality
-
-- Scan media files without modifying them.
-- Match dates from filenames or enclosing date folders.
-- Prioritize second, minute, hour, then day precision.
-- Inspect match results, unmatched files, and conflicting candidates in a unified filtered workspace.
-- Apply changes to the matching selection only, with local undo journals.
-
-## Current limitations
-
-- Embedded EXIF / QuickTime metadata is not yet inspected; files with embedded timestamps may be displayed differently by photo library software.
-- Full real-device desktop usability testing is not complete.
-- Preview the results and start with copied sample files before processing a full library.
-
-No personal photographs, machine telemetry, or scan reports are bundled with this release.
+## 已知限制
+首版 EXIF 写入只针对支持的照片格式；MP4/MOV 视频需另行处理 QuickTime 日期元数据。尚未完成真实照片库批量测试，建议先用少量复制出的照片验证。

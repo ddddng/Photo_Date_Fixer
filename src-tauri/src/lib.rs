@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 mod exif;
 use filetime::{set_file_mtime, FileTime};
 use regex::Regex;
@@ -783,7 +783,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let rules_path = local_dir(app.handle()).map_err(std::io::Error::other)?.join("rules.json");
-            let rules = fs::read(&rules_path).ok().and_then(|data| serde_json::from_slice::<Vec<Rule>>(&data).ok()).unwrap_or_else(default_rules);
+            let mut rules = fs::read(&rules_path).ok().and_then(|data| serde_json::from_slice::<Vec<Rule>>(&data).ok()).unwrap_or_else(default_rules);
+            // Existing installations keep their personalized rules, while newly
+            // shipped built-ins are added exactly once by stable rule ID.
+            for builtin in default_rules() {
+                if !rules.iter().any(|rule| rule.id == builtin.id) {
+                    rules.push(builtin);
+                }
+            }
             let settings = fs::read(local_dir(app.handle()).map_err(std::io::Error::other)?.join("settings.json"))
                 .ok().and_then(|data| serde_json::from_slice::<Settings>(&data).ok()).unwrap_or_default();
             app.manage(Arc::new(Runtime { files: Mutex::new(Vec::new()), root: Mutex::new(None), rules: Mutex::new(rules), settings: Mutex::new(settings), cancel: AtomicBool::new(false) }));
