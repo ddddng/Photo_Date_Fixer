@@ -2,13 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { locale as getSystemLocale } from '@tauri-apps/plugin-os';
 import {
   CalendarClock, FolderOpen, ScanSearch, SlidersHorizontal, ListFilter,
   AlertTriangle, History, Sun, Moon, Plus, Save, Trash2, Pencil,
   Eye, Play, Download, RotateCcw, X, ShieldCheck, LoaderCircle, Search,
   Languages,
 } from 'lucide-react';
-import { translate, ruleTitle, message as localizeError, type Locale } from './i18n';
+import { translate, ruleTitle, message as localizeError, systemLanguageToLocale, type Locale } from './i18n';
 import './styles.css';
 
 type Rule = {
@@ -115,9 +116,17 @@ function FileResult({
   </>;
 }
 
+type LanguageChoice = Locale | 'system';
+const languageStorageKey = 'photo-date-fixer-language';
+function readLanguageChoice(): LanguageChoice {
+  const saved = window.localStorage.getItem(languageStorageKey);
+  return saved === 'zh' || saved === 'en' ? saved : 'system';
+}
+
 export default function App() {
-  const [locale, setLocale] = useState<Locale>(() =>
-    window.localStorage.getItem('photo-date-fixer-language') === 'zh' ? 'zh' : 'en');
+  const [languageChoice, setLanguageChoice] = useState<LanguageChoice>(readLanguageChoice);
+  const [systemLocale, setSystemLocale] = useState<Locale>(() => systemLanguageToLocale(navigator.language));
+  const locale: Locale = languageChoice === 'system' ? systemLocale : languageChoice;
   const t = (key: string) => translate(locale, key);
   const [tab, setTab] = useState<Tab>('scan');
   const [dark, setDark] = useState(true);
@@ -163,8 +172,25 @@ export default function App() {
   }, [dark]);
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
-    window.localStorage.setItem('photo-date-fixer-language', locale);
   }, [locale]);
+  useEffect(() => {
+    // Read the native OS locale, not the WebView's preferred language.
+    // Browser language is a fallback if the OS locale cannot be determined.
+    let cancelled = false;
+    void getSystemLocale()
+      .then(language => {
+        if (!cancelled) setSystemLocale(systemLanguageToLocale(language ?? navigator.language));
+      })
+      .catch(() => {
+        if (!cancelled) setSystemLocale(systemLanguageToLocale(navigator.language));
+      });
+    return () => { cancelled = true; };
+  }, []);
+  const changeLanguage = (choice: LanguageChoice) => {
+    setLanguageChoice(choice);
+    if (choice === 'system') window.localStorage.removeItem(languageStorageKey);
+    else window.localStorage.setItem(languageStorageKey, choice);
+  };
   useEffect(() => {
     void invoke<Rule[]>('get_rules').then(setRules).catch(e => notify(shortError(e)));
     void invoke<Settings>('get_settings').then(setSettings).catch(e => notify(shortError(e)));
@@ -280,7 +306,8 @@ export default function App() {
         </div>
         <label className="locale-picker">
           <Languages size={16}/>
-          <select aria-label={t('Language')} value={locale} onChange={e => setLocale(e.target.value as Locale)}>
+          <select aria-label={t('Language')} value={languageChoice} onChange={e => changeLanguage(e.target.value as LanguageChoice)}>
+            <option value="system">{t('System language')}</option>
             <option value="en">English</option>
             <option value="zh">简体中文</option>
           </select>
@@ -289,7 +316,7 @@ export default function App() {
           {dark ? <Sun size={16}/> : <Moon size={16}/>}
           {t(dark ? 'Light mode' : 'Dark mode')}
         </button>
-        <div className="footnote">GPLv3 · VERSION 1.1</div>
+        <div className="footnote">GPLv3 · VERSION 1.1.1</div>
       </div>
     </aside>
 

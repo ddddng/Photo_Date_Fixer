@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 — Native system-language detection
+
+- Read the system locale through Tauri's OS plugin using only locale permission.
+- First launch follows Chinese → Simplified Chinese; other languages → English.
+- Sidebar supports System language, English and Simplified Chinese; explicit
+  user choices are persisted locally and override auto-detection.
+- Add automated locale resolution and preference-priority tests.
+
 ## 1.1.0 — Parallel EXIF repairs and bilingual desktop UI
 
 - Configurable parallel pool of 1–8 persistent ExifTool workers (default 4).

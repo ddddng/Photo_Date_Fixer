@@ -29,8 +29,10 @@ embedded **EXIF metadata**. It uses Tauri 2, React, TypeScript and Rust.
   reusing its own hidden ExifTool process. The default is 4. This removes
   the previous one-file-at-a-time bottleneck without skipping backups or
   verification. Real throughput varies with file size, format and storage.
-- **English and 简体中文 interface:** English is the initial language; switch
-  languages in the sidebar. The choice is saved locally on this device.
+- **English and 简体中文 interface:** The first launch follows the operating
+  system language (Chinese → Simplified Chinese; otherwise English).
+  Choose System language, English or 简体中文 in the sidebar. A manual
+  choice is saved locally and takes priority over the system setting.
 - Fully offline photo operations: no accounts, uploads, telemetry or hardware
   identification.
 

@@ -1,5 +1,11 @@
 export type Locale = 'en' | 'zh';
 
+// Only the language code is used locally. No OS version or other device data is read.
+export function systemLanguageToLocale(language: string | null | undefined): Locale {
+  return /^zh(?:[-_]|$)/i.test(language?.trim() ?? '') ? 'zh' : 'en';
+}
+
+
 /** English strings are canonical. Chinese translations never affect matching logic. */
 const zh: Record<string, string> = {
   'Workspace': '工作空间',
@@ -12,6 +18,7 @@ const zh: Record<string, string> = {
   'Dark mode': '深色模式',
   'Light mode': '浅色模式',
   'Language': '语言',
+  'System language': '跟随系统',
   'English': 'English',
   '简体中文': '简体中文',
   'Running locally': '本地运行',
